@@ -2,8 +2,10 @@
 title: "Fish 16S Analysis"
 author: "Ashley Bell"
 date: "`r Sys.Date()`"
-output: html_document
-editor_options: 
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
   chunk_output_type: console
 ---
 ```{r, setup}
@@ -379,13 +381,6 @@ fresh.tank.p <- plot_ordination(fresh.tank, ps.tran.wunifrac.pcoa, type = "sampl
   #scale_fill_manual(name = "pond.tank.RAS.wild", values = cult.clrs, na.value=alpha("#FFFFFF", 0)) +
   theme_bw() +
   labs(title=paste0("Freshwater laboratory tanks\nSamples = ", nrow(sample_data(fresh.tank)), "; fish species = ", length(unique(sample_data(fresh.tank)$host_species))))
-  #annotate(geom = "label", 
-  #          label = paste0("PERMANOVA R² = ", round(cult.salt.adonis$R2[1], 2), 
-  #                        "; p < ", cult.salt.adonis$`Pr(>F)`[1], 
-  #                         "\nANOSIM R² = ", round(cult.salt.anosim$statistic, 2),
-  #                         "; p = ", cult.salt.anosim$signif),
-  #          vjust = 1, hjust = 0, x=-Inf, y = Inf)
-
 
 fresh.wild.p <- plot_ordination(fresh.wild, ps.tran.wunifrac.pcoa, type = "samples", color = "pond.tank.RAS.wild") +
   geom_point(size=2) +
@@ -2081,4 +2076,4 @@ df <- tibble(Water_condtion = c(rep("Freshwater", 8), rep("Saltwater", 8)),
                     adonis.pH.HS.salt$R2[1:2],
                     adonis.dO2.HS.fresh$R2[1:2],
                     NA,NA))
-````
+```
