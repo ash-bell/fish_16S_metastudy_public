@@ -1,0 +1,2084 @@
+---
+title: "Fish 16S Analysis"
+author: "Ashley Bell"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r, setup}
+# Load librarieslibrary(phyloseq)
+library(tidyverse)
+library(ggpubr)
+library(ggtree)
+library(ggh4x)
+library(igraph)
+library(ggnetwork)
+library(dendextend)
+library(ggdendro)
+library(DECIPHER)
+library(pheatmap)
+library(vegan)
+library(ggalluvial)
+library(scales)
+library(RColorBrewer)
+library(ape)
+library(broom)
+library(ggrepel)
+library(ggplotify)
+library(cols4all)
+
+# load in pairwise.adonis2 as not a package
+#https://github.com/pmartinezarbizu/pairwiseAdonis
+source("C:/Users/agb214/OneDrive - University of Exeter/PhD/R_files/pairwise.adonis2.R")
+
+# Set preferences
+set.seed(1234)
+`%!in%` <- Negate(`%in%`)
+setwd('C:/Users/agb214/OneDrive - University of Exeter/PhD/fish_16S/')
+
+# load in PS obj
+ps <- readRDS("data/all_studies_phyloseq.rds")
+tree <-read.tree("data/TPM3uf_IQTREE.treefile")
+phy_tree(ps) <- tree
+
+# relative abundance PS obj
+ps.tran <- transform_sample_counts(ps.new, function (x) x/sum(x))
+
+# Define my colours
+clrs = c('#3cb44b', '#e6194b', '#F3C300', '#0067A5', '#f58231', 
+         '#911eb4', '#42d4f4', '#f032e6', '#bfef45', '#E68FAC', 
+         '#469990', '#dcbeff', '#9a6324', '#fffac8', '#800000', 
+         '#aaffc3', '#808000', '#ffd8b1', '#000075', '#a9a9a9', 
+         '#0B6623', '#000000', '#B3446C', '#F99379', '#C2B280',
+         '#875692', '#A1CAF1', '#2B3D26', '#8DB600', '#E25822',
+         '#6195CF', '#90C987', '#CAE0AB', '#F7CB45', '#42150A', '#A5170E')
+```
+```{r Figure 1 Alluvial plot}
+# Figure 1
+# make my alluvial plot
+# easier to curate this in excel and load it in
+# edited in affinity designer to make final plot
+QC.res <- read_csv("data/study_QC_results.csv")
+head(QC.res)
+QC.res %>%
+  mutate(`Relevant study titles` = 1) %>%
+  to_lodes_form(axis = 2:8) %>%
+  ggplot(aes(x, stratum = stratum, alluvium = alluvium, y = `Relevant study titles`, fill = `Exclusion reason`)) +
+  geom_flow(aes.flow = "backward", na.rm=TRUE) +
+  geom_stratum(na.rm = TRUE, fill = "white") +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), na.rm = TRUE) +
+  theme_classic() +
+  scale_fill_manual(values = clrs) +
+  theme(axis.title.x=element_blank())
+```
+```{r Table 1 list of studies}
+metadata <- sample_data(ps.tran) %>%
+  data.frame() %>%
+  tibble()
+
+num.samples <- metadata %>%
+  group_by(BioProject) %>%
+  summarise(Num.samples = n())
+
+table <- metadata %>%
+  select(BioProject, host_species, manuscript) %>%
+  unique() %>%
+  inner_join(num.samples, by = "BioProject") 
+
+write.csv(table, "data/list_of_studies.csv")
+```
+```{r Figure 2 Abundance bar and boxplots}
+# Figure 2
+# Abundance barplots
+# get taxa table with ASV as column
+total_tax <- tax_table(ps) %>%
+  data.frame() %>%
+  rownames_to_column(var = "ASV") %>%
+  tibble()
+
+# From sample data only get host lineage
+lineage <- c("host_superkingdom","host_phylum","host_class","host_order","host_family","host_genus","host_species")
+host <- sample_data(ps) %>%
+  data.frame() %>%
+  select(all_of(lineage), water.cond) %>%
+  rownames_to_column(var = "Sample") %>%
+  tibble()
+
+# Join ASV taxa and host taxa data frames with ASV abundance
+tax.host.asv.composite <- data.frame(otu_table(ps)) %>%
+  rownames_to_column(var = "ASV") %>%
+  pivot_longer(!ASV, names_to = "Sample", values_to = "count") %>%
+  filter(count > 0) %>%
+  left_join(host, by = "Sample") %>%
+  left_join(total_tax, by = "ASV") %>%
+  filter(!is.na(host_species))
+
+tax.host.asv.composite.salt <- tax.host.asv.composite %>%
+  filter(water.cond == "saltwater")
+
+tax.host.asv.composite.fresh <- tax.host.asv.composite %>%
+  filter(water.cond == "freshwater")
+
+### What are the most abundant phylum in saltwater fish as barplot
+HS.phylum.salt <- tax.host.asv.composite.salt %>%
+  select(host_species, count, Phylum) %>%
+  group_by(host_species, Phylum) %>%
+  summarise(count = sum(count), .groups = "drop_last") %>%
+  mutate(rel_abund = count/sum(count)*100) %>%
+  select(-count) %>%
+  ungroup()
+
+top5.phylum.salt <- HS.phylum.salt %>%
+  group_by(Phylum) %>%
+  summarise(sum_rel_abund = sum(rel_abund)/length(unique(HS.phylum.salt$host_species))) %>%
+  slice_max(sum_rel_abund, n = 5)
+
+top5.phylum.salt.mod <- HS.phylum.salt %>%
+  filter(Phylum %in% top5.phylum.salt$Phylum) %>%
+  group_by(host_species) %>%
+  group_modify(~add_row(., Phylum = "Others", 
+                        rel_abund = (100 - sum(.$rel_abund)),
+                        host_species = .$host_species)) %>%
+  arrange(rel_abund) %>%
+  mutate(Phylum = factor(Phylum, levels = Phylum)) %>%
+  ungroup()
+
+tree <- read.tree("data/summarised_lineage_phylip_tree.phy")
+tree$tip.label <- gsub("_"," ", tree$tip.label)
+tree$tip.label <- gsub("'","", tree$tip.label)
+
+pruned.salt.tree <- keep.tip(tree, as.vector(unique(HS.phylum.salt$host_species)))
+
+salt.tree.p <- ggtree(pruned.salt.tree, branch.length='none')
+
+species_order <- get_taxa_name(ggtree(tree))
+
+top5.phylum.salt.mod$host_species <- factor(top5.phylum.salt.mod$host_species, levels = species_order)
+
+top5.phylum.salt.mod <- filter(top5.phylum.salt.mod, !is.na(host_species))
+
+salt.barplot.p <- ggplot(top5.phylum.salt.mod, aes(x = fct_rev(host_species), y = rel_abund, fill = Phylum)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  xlab("") +
+  ylab("Bacterial Phyla Relative Abundance") +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 100)) +
+  coord_flip() +
+  theme(legend.position="top") +
+  guides(fill = guide_legend(nrow = 2))
+
+salt.phylum.p <- ggarrange(salt.tree.p, salt.barplot.p, 
+                            nrow = 1, widths = c(1, 5))
+
+### Boxplot 
+HS.class.salt <- tax.host.asv.composite.salt %>%
+  select(host_species, count, Class) %>%
+  group_by(host_species, Class) %>%
+  summarise(count = sum(count), .groups = "drop_last") %>%
+  mutate(rel_abund = count/sum(count)*100) %>%
+  select(-count) %>%
+  ungroup()
+
+top10.class.salt <- HS.class.salt %>%
+  group_by(Class) %>%
+  summarise(sum_rel_abund = sum(rel_abund)/length(unique(HS.class.salt$host_species))) %>%
+  slice_max(sum_rel_abund, n = 10)
+
+top10.class.salt.mod <- HS.class.salt %>%
+  filter(Class %in% top10.class.salt$Class) %>%
+  group_by(host_species) %>%
+  group_modify(~add_row(., Class = "Others", 
+                        rel_abund = (100 - sum(.$rel_abund)),
+                        host_species = .$host_species)) %>%
+  arrange(rel_abund) %>%
+  mutate(Class = factor(Class, levels = Class)) %>%
+  ungroup()
+
+top10.class.salt.mod <- filter(top10.class.salt.mod, !is.na(host_species))
+
+salt.medians <- aggregate(rel_abund ~ Class, top10.class.salt.mod, median)
+
+salt.class.p <- ggplot(top10.class.salt.mod, aes(x = reorder(Class, -rel_abund, FUN = median), y = rel_abund, fill = Class)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Paired") +
+  xlab("Bacterial Class") +
+  ylab("Saltwater Fish Skin Relative Abundance") +
+  geom_text(data = salt.medians, aes(label = paste0(round(rel_abund, digits = 2), "%"), y = rel_abund + 2)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+
+############## What are the most abundant phylum in freshwater fish as barplot
+
+HS.phylum.fresh <- tax.host.asv.composite.fresh %>%
+  select(host_species, count, Phylum) %>%
+  group_by(host_species, Phylum) %>%
+  summarise(count = sum(count), .groups = "drop_last") %>%
+  mutate(rel_abund = count/sum(count)*100) %>%
+  select(-count) %>%
+  ungroup()
+
+top5.phylum.fresh <- HS.phylum.fresh %>%
+  group_by(Phylum) %>%
+  summarise(sum_rel_abund = sum(rel_abund)/length(unique(HS.phylum.fresh$host_species))) %>%
+  slice_max(sum_rel_abund, n = 5)
+
+top5.phylum.fresh.mod <- HS.phylum.fresh %>%
+  filter(Phylum %in% top5.phylum.fresh$Phylum) %>%
+  group_by(host_species) %>%
+  group_modify(~add_row(., Phylum = "Others", 
+                        rel_abund = (100 - sum(.$rel_abund)),
+                        host_species = .$host_species)) %>%
+  arrange(rel_abund) %>%
+  mutate(Phylum = factor(Phylum, levels = Phylum)) %>%
+  ungroup()
+
+tree <- read.tree("data/summarised_lineage_phylip_tree.phy")
+tree$tip.label <- gsub("_"," ", tree$tip.label)
+tree$tip.label <- gsub("'","", tree$tip.label)
+
+pruned.fresh.tree <- keep.tip(tree, as.vector(unique(HS.phylum.fresh$host_species)))
+
+fresh.tree.p <- ggtree(pruned.fresh.tree, branch.length='none')
+
+species_order <- get_taxa_name(ggtree(tree))
+
+top5.phylum.fresh.mod$host_species <- factor(top5.phylum.fresh.mod$host_species, levels = species_order)
+
+top5.phylum.fresh.mod <- filter(top5.phylum.fresh.mod, !is.na(host_species))
+
+fresh.barplot.p <- ggplot(top5.phylum.fresh.mod, aes(x = fct_rev(host_species), y = rel_abund, fill = Phylum)) +
+  geom_bar(stat = "identity") +
+  #geom_text(aes(label = paste0(round(rel_abund, digits = 0), "%")),
+  #          position = position_stack(vjust = 0.5), size = 2) +
+  scale_fill_brewer(palette = "Set1") +
+  theme_minimal() +
+  xlab("") +
+  ylab("Bacterial Phyla Relative Abundance") +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 100)) +
+  coord_flip() +
+  theme(legend.position="top") +
+  guides(fill = guide_legend(nrow = 2))
+
+# Modified in affinity designer  
+fresh.phylum.p <- ggarrange(fresh.tree.p, fresh.barplot.p, nrow = 1, widths = c(1, 5))
+
+### Boxplot 
+HS.class.fresh <- tax.host.asv.composite.fresh %>%
+  select(host_species, count, Class) %>%
+  group_by(host_species, Class) %>%
+  summarise(count = sum(count), .groups = "drop_last") %>%
+  mutate(rel_abund = count/sum(count)*100) %>%
+  select(-count) %>%
+  ungroup()
+
+top10.class.fresh <- HS.class.fresh %>%
+  group_by(Class) %>%
+  summarise(sum_rel_abund = sum(rel_abund)/length(unique(HS.class.fresh$host_species))) %>%
+  slice_max(sum_rel_abund, n = 10)
+
+top10.class.fresh.mod <- HS.class.fresh %>%
+  filter(Class %in% top10.class.fresh$Class) %>%
+  group_by(host_species) %>%
+  group_modify(~add_row(., Class = "Others", 
+                        rel_abund = (100 - sum(.$rel_abund)),
+                        host_species = .$host_species)) %>%
+  arrange(rel_abund) %>%
+  mutate(Class = factor(Class, levels = Class)) %>%
+  ungroup()
+
+top10.class.fresh.mod <- filter(top10.class.fresh.mod, !is.na(host_species))
+
+fresh.medians <- aggregate(rel_abund ~ Class, top10.class.fresh.mod, median)
+
+fresh.class.p <- ggplot(top10.class.fresh.mod, aes(x = reorder(Class, -rel_abund, FUN = median), y = rel_abund, fill = Class)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Paired") +
+  xlab("Bacterial Class") +
+  ylab("Freshwater Fish Skin Relative Abundance") +
+  geom_text(data = fresh.medians, aes(label = paste0(round(rel_abund, digits = 2), "%"), 
+                                      y = rel_abund + 2)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+#############################
+class.names <- unique(c(top10.class.fresh.mod$Class, top10.class.salt.mod$Class))
+
+class.clrs <- c4a("poly.wright25", length(class.names))
+names(class.clrs) <- class.names
+
+phylum.names <- unique(c(top5.phylum.fresh.mod$Phylum, top5.phylum.salt.mod$Phylum))
+
+phylum.clrs <- c4a("brewer.set1", length(phylum.names))
+names(phylum.clrs) <- phylum.names
+
+ggarrange(fresh.tree.p+xlab("\n") + 
+            theme(axis.title.x=element_text(size=4)), 
+          fresh.barplot.p + 
+            scale_fill_manual(values = phylum.clrs) + 
+            theme(axis.title.x=element_blank(),
+                  axis.text.y=element_text(face="italic")),
+          fresh.class.p + 
+            scale_fill_manual(values = class.clrs) + 
+            theme(axis.title.x=element_blank()),
+          salt.tree.p+xlab("\n") + 
+            theme(axis.title.x=element_text(size=10)),
+          salt.barplot.p + 
+            scale_fill_manual(values = phylum.clrs) +
+            theme(axis.text.y=element_text(face="italic")),
+          salt.class.p + 
+            scale_fill_manual(values = class.clrs), 
+          nrow = 2, ncol = 3, labels = c("A","","B","C","","D"),
+          common.legend = TRUE, widths = c(1, 5, 4), 
+          heights = c(1,3)) +
+  labs(title = "\n") +
+  theme(plot.title = element_text(size=25)) +
+  xlab("\n")
+```
+```{r Figure 3 cultivation env}
+### rename outdoor and indoor flowthrough to treated and untreated
+ps.tran <- readRDS("data/wrking_trsfm_PS_obj.rds")
+sample_data(ps.tran) <- sample_data(ps.tran) %>%
+  data.frame() %>%
+  mutate(pond.tank.RAS.wild = str_replace(pond.tank.RAS.wild, "indoor flowthrough", "treated flowthrough"),
+         pond.tank.RAS.wild = str_replace(pond.tank.RAS.wild, "outdoor flowthrough", "untreated flowthrough"))
+
+### We first need to split the cultivation into six categories, fresh and salt, and for each, outdoor aquaculture, indoor tanks and wild samples.
+cult.systems <- sample_data(ps.tran) %>% 
+  data.frame()  %>%
+  select(pond.tank.RAS.wild) %>%
+  unique()
+
+#define colours
+cult.clrs <- clrs[1:length(cult.systems$pond.tank.RAS.wild)]
+names(cult.clrs) <- cult.systems$pond.tank.RAS.wild
+
+###
+fresh.tank <- subset_samples(ps.tran, pond.tank.RAS.wild %in% c("tank; RAS", "RAS", "tank; treated flowthrough", "tank; flowthrough", "tank") & water.cond %in% c("freshwater"))
+
+fresh.wild <- subset_samples(ps.tran, pond.tank.RAS.wild %in% c("wild") & water.cond %in% c("freshwater"))
+
+fresh.aquaculture <- subset_samples(ps.tran, pond.tank.RAS.wild %in% c("outdoor aquaculture pond", "untreated flowthrough", "wild; seacages") & water.cond %in% c("freshwater"))
+
+salt.tank <- subset_samples(ps.tran, pond.tank.RAS.wild %in% c("tank; RAS", "RAS", "tank; treated flowthrough", "tank; flowthrough", "tank") & water.cond %in% c("saltwater"))
+
+salt.wild <- subset_samples(ps.tran, pond.tank.RAS.wild %in% c("wild") & water.cond %in% c("saltwater"))
+
+salt.aquaculture <- subset_samples(ps.tran, pond.tank.RAS.wild %in% c("outdoor aquaculture pond", "untreated flowthrough", "wild; seacages") & water.cond %in% c("saltwater"))
+
+# My ordinations took awhile to i've run and save these as RDS
+#ps.tran.wunifrac.pcoa <- ordinate(ps.tran, method="PCoA", distance=wunifrac.dist)
+#saveRDS(ps.tran.wunifrac.pcoa, "data/ps.tran.wunifrac.pcoa.rds")
+ps.tran.wunifrac.pcoa <- readRDS("data/ps.tran.wunifrac.pcoa.rds")
+
+fresh.tank.p <- plot_ordination(fresh.tank, ps.tran.wunifrac.pcoa, type = "samples", color = "pond.tank.RAS.wild") +
+  geom_point(size=2) +
+  scale_color_manual(name = "pond.tank.RAS.wild", values = cult.clrs, na.value=alpha("#DEDEDE", 0.1)) +
+  #stat_ellipse(geom = "polygon", alpha = 0.05, aes(fill = pond.tank.RAS.wild)) +
+  #scale_fill_manual(name = "pond.tank.RAS.wild", values = cult.clrs, na.value=alpha("#FFFFFF", 0)) +
+  theme_bw() +
+  labs(title=paste0("Freshwater laboratory tanks\nSamples = ", nrow(sample_data(fresh.tank)), "; fish species = ", length(unique(sample_data(fresh.tank)$host_species))))
+  #annotate(geom = "label", 
+  #          label = paste0("PERMANOVA R� = ", round(cult.salt.adonis$R2[1], 2), 
+  #                        "; p < ", cult.salt.adonis$`Pr(>F)`[1], 
+  #                         "\nANOSIM R� = ", round(cult.salt.anosim$statistic, 2),
+  #                         "; p = ", cult.salt.anosim$signif),
+  #          vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+
+fresh.wild.p <- plot_ordination(fresh.wild, ps.tran.wunifrac.pcoa, type = "samples", color = "pond.tank.RAS.wild") +
+  geom_point(size=2) +
+  scale_color_manual(name = "pond.tank.RAS.wild", values = cult.clrs, na.value=alpha("#DEDEDE", 0.1)) +
+  theme_bw() +
+  labs(title=paste0("Freshwater (wild)\nSamples = ", nrow(sample_data(fresh.wild)), "; fish species = ", length(unique(sample_data(fresh.wild)$host_species))))
+
+fresh.aquaculture.p <- plot_ordination(fresh.aquaculture, ps.tran.wunifrac.pcoa, type = "samples", color = "pond.tank.RAS.wild") +
+  geom_point(size=2) +
+  scale_color_manual(name = "pond.tank.RAS.wild", values = cult.clrs, na.value=alpha("#DEDEDE", 0.1)) +
+  theme_bw() +
+  labs(title=paste0("Freshwater aquaculture\nSamples = ", nrow(sample_data(fresh.aquaculture)), "; fish species = ", length(unique(sample_data(fresh.aquaculture)$host_species))))
+
+salt.tank.p <- plot_ordination(salt.tank, ps.tran.wunifrac.pcoa, type = "samples", color = "pond.tank.RAS.wild") +
+  geom_point(size=2) +
+  scale_color_manual(name = "pond.tank.RAS.wild", values = cult.clrs, na.value=alpha("#DEDEDE", 0.1)) +
+  theme_bw() +
+  labs(title=paste0("Saltwater laboratory tanks\nSamples = ", nrow(sample_data(salt.tank)), "; fish species = ", length(unique(sample_data(salt.tank)$host_species))))
+
+salt.wild.p <- plot_ordination(salt.wild, ps.tran.wunifrac.pcoa, type = "samples", color = "pond.tank.RAS.wild") +
+  geom_point(size=2) +
+  scale_color_manual(name = "pond.tank.RAS.wild", values = cult.clrs, na.value=alpha("#DEDEDE", 0.1)) +
+  theme_bw() +
+  labs(title=paste0("Saltwater (wild)\nSamples = ", nrow(sample_data(salt.wild)), "; fish species = ", length(unique(sample_data(salt.wild)$host_species))))
+
+salt.aquaculture.p <- plot_ordination(salt.aquaculture, ps.tran.wunifrac.pcoa, type = "samples", color = "pond.tank.RAS.wild") +
+  geom_point(size=2) +
+  scale_color_manual(name = "pond.tank.RAS.wild", values = cult.clrs, na.value=alpha("#DEDEDE", 0.1)) +
+  theme_bw() +
+  labs(title=paste0("Saltwater aquaculture\nSamples = ", nrow(sample_data(salt.aquaculture)), "; fish species = ", length(unique(sample_data(salt.aquaculture)$host_species))))
+
+cult.legend <- plot_ordination(ps.tran, ps.tran.wunifrac.pcoa, type = "samples", color = "pond.tank.RAS.wild") +
+  geom_point(size=2) +
+  scale_color_manual(name = "pond.tank.RAS.wild", values = cult.clrs) +
+  guides(colour=guide_legend(title="Fish cultivation method"))
+
+ggarrange(fresh.tank.p, fresh.wild.p, fresh.aquaculture.p,
+          salt.tank.p, salt.wild.p, salt.aquaculture.p, 
+          labels = "AUTO", align = "hv", legend = "none")
+
+as_ggplot(get_legend(cult.legend, position = "bottom"))
+```
+```{r Table 2 and 3 cultivate stats}
+
+## We need to make new catagories to combine lab samples together to run a PERMANOVA, ANOSIM and pairwise adonis
+freshwater <- subset_samples(ps.tran, water.cond %in% c("freshwater"))
+freshwater <- prune_taxa(taxa_sums(freshwater) > 0, freshwater)
+
+meta.fresh <- sample_data(freshwater) %>%
+  data.frame() %>%
+  mutate(pond.tank.RAS.wild = str_replace(pond.tank.RAS.wild, "tank; indoor flowthrough", "tank; treated flowthrough"),
+         pond.tank.RAS.wild = str_replace(pond.tank.RAS.wild, "tank; outdoor flowthrough", "tank; untreated flowthrough"),
+         pond.tank.RAS.wild = str_replace(pond.tank.RAS.wild, "outdoor flowthrough", "untreated flowthrough"))
+
+#wunifrac.dist.fresh <- phyloseq::distance(freshwater, method = "wunifrac")
+#saveRDS(wunifrac.dist.fresh, "/Users/agb214/OneDrive - University of Exeter/PhD/fish_16S/data/wunifrac.dist.fresh.rds")
+wunifrac.dist.fresh <- readRDS("/Users/agb214/OneDrive - University of Exeter/PhD/fish_16S/data/wunifrac.dist.fresh.rds")
+
+adonis.cult.fresh <- adonis2(wunifrac.dist.fresh ~ pond.tank.RAS.wild, by = "term", data = meta.fresh, permutations = 999)
+
+PA.cult.fresh <- pairwise.adonis2(wunifrac.dist.fresh ~ pond.tank.RAS.wild, data = meta.fresh)
+
+PA.cult.fresh.tidy <- tibble(PA.cult.fresh) %>%
+  slice_tail(n = -1) %>%
+  unnest(cols = c(PA.cult.fresh)) %>%
+  na.exclude() %>%
+  mutate(pairs = names(PA.cult.fresh)[-1]) %>%
+  separate(col = pairs, into = c("pair1", "pair2"), sep = "_vs_") %>%
+  select(pair1, pair2, R2, `Pr(>F)`) %>%
+  mutate(R2 = round(R2, digits = 2))
+
+n.fresh <- meta.fresh %>% 
+  group_by(pond.tank.RAS.wild) %>%
+  summarise(n = n(), n.studies = length(unique(BioProject))) %>%
+  dplyr::rename(pair1 = pond.tank.RAS.wild) 
+
+n.fresh <- n.fresh %>%
+  inner_join(PA.cult.fresh.tidy, by = "pair1") %>%
+  inner_join(dplyr::rename(n.fresh, pair2 = pair1),. , by = "pair2")
+
+write.csv(n.fresh, "/Users/agb214/OneDrive - University of Exeter/PhD/fish_16S/data/PA.cult.fresh.tidy.csv")
+
+nrow(meta.fresh)
+length(unique(meta.fresh$BioProject))
+
+saltwater <- subset_samples(ps.tran, water.cond == "saltwater")
+saltwater <- prune_taxa(taxa_sums(saltwater) > 0, saltwater)
+
+meta.salt <- sample_data(saltwater) %>%
+  data.frame() %>%
+  mutate(pond.tank.RAS.wild = str_replace(pond.tank.RAS.wild, "tank; indoor flowthrough", "tank; treated flowthrough"),
+         pond.tank.RAS.wild = str_replace(pond.tank.RAS.wild, "tank; outdoor flowthrough", "tank; untreated flowthrough"),
+         pond.tank.RAS.wild = str_replace(pond.tank.RAS.wild, "outdoor flowthrough", "untreated flowthrough"))
+
+#wunifrac.dist.salt <- phyloseq::distance(saltwater, method = "wunifrac")
+#saveRDS(wunifrac.dist.salt, "/Users/agb214/OneDrive - University of Exeter/PhD/fish_16S/data/wunifrac.dist.salt.rds")
+wunifrac.dist.salt <- readRDS("/Users/agb214/OneDrive - University of Exeter/PhD/fish_16S/data/wunifrac.dist.salt.rds")
+
+
+adonis.cult.salt <- adonis2(wunifrac.dist.salt ~ pond.tank.RAS.wild, by = "term", 
+        data = meta.salt, permutations = 999)
+
+PA.cult.salt <- pairwise.adonis2(wunifrac.dist.salt ~ pond.tank.RAS.wild, data = meta.salt)
+                                   
+PA.cult.salt.tidy <- tibble(PA.cult.salt) %>%
+  slice_tail(n = -1) %>%
+  unnest(cols = c(PA.cult.salt)) %>%
+  na.exclude() %>%
+  mutate(pairs = names(PA.cult.salt)[-1]) %>%
+  separate(col = pairs, into = c("pair1", "pair2"), sep = "_vs_") %>%
+  select(pair1, pair2, R2, `Pr(>F)`) %>%
+  mutate(R2 = round(R2, digits = 2))
+
+n.salt <- meta.salt %>% 
+  group_by(pond.tank.RAS.wild) %>%
+  summarise(n.samples = n(), n.studies = length(unique(BioProject))) %>%
+  dplyr::rename(pair1 = pond.tank.RAS.wild) 
+
+n.salt <- n.salt %>%
+  inner_join(PA.cult.salt.tidy, by = "pair1") %>%
+  inner_join(dplyr::rename(n.salt, pair2 = pair1),. , by = "pair2")
+
+write.csv(n.salt, "/Users/agb214/OneDrive - University of Exeter/PhD/fish_16S/data/PA.cult.salt.tidy.csv")
+nrow(meta.salt)
+length(unique(meta.salt$BioProject))
+```
+```{r Figure 4 and 5 Phys chem plots}
+# This is split by phys chem due to the length of the code
+```
+```{r F4 Temperature fresh}
+temp.fresh <- subset_samples(ps.tran, water.cond %in% c("freshwater", "saline") & !is.na(temperature_C))
+
+temp.fresh <- prune_taxa(taxa_sums(temp.fresh) > 0, temp.fresh)
+
+wunifrac.temp.fresh <- phyloseq::distance(temp.fresh, method = "wunifrac")
+wunifrac.pcoa.temp.fresh <- phyloseq::ordinate(temp.fresh, method = "PCoA", distance = wunifrac.temp.fresh)
+
+adonis.temp.fresh <- adonis2(wunifrac.temp.fresh ~ temperature_C, data = data.frame(sample_data(temp.fresh)), permutations = 999, by = "term")
+
+fresh.temp.p <- plot_ordination(temp.fresh, wunifrac.pcoa.temp.fresh, type = "samples", color = "temperature_C") +
+  geom_point(size=3) +
+  scale_colour_gradient(low = "blue", high = "red", na.value=alpha("#DEDEDE", 0.1)) +
+  ggtitle(paste0("Temperature beta diversity\nSamples = ",
+                 nrow(sample_data(temp.fresh)),
+                 "; fish species = ",
+                 length(unique(sample_data(temp.fresh)$host_species)))) +
+  labs(color = "캜") +
+  theme_bw()
+  
+fresh.temp.p.stats <- fresh.temp.p +
+  annotate(geom = "label", 
+            label = paste0("PERMANOVA R� = ", format(round(adonis.temp.fresh$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ", adonis.temp.fresh$`Pr(>F)`[1]), 
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+### alpha ###
+temp.fresh.NT <- subset_samples(ps, water.cond %in% c("freshwater", "saline") & !is.na(temperature_C))
+
+temp.fresh.NT <- prune_taxa(taxa_sums(temp.fresh.NT) > 0, temp.fresh.NT)
+
+temp.fresh.NT.shannon <- estimate_richness(temp.fresh.NT, measures = "Shannon")
+
+temp.fresh.NT.meta <- data.frame(sample_data(temp.fresh.NT)) %>%
+  rownames_to_column(var = "Sample")
+
+temp.fresh.NT.shannon.p <- temp.fresh.NT.shannon %>%
+  rownames_to_column(var = "Sample") %>%
+  inner_join(temp.fresh.NT.meta, by = "Sample") %>%
+  select(Shannon, Sample, temperature_C, host_species) %>%
+  ggscatter(., 
+            x = "temperature_C", 
+            y = "Shannon",
+            ylab = "Shannon Diversity",
+            xlab = "Temperature (캜)",
+            title = paste0("Temperature alpha diversity\nSamples = ",
+                 nrow(sample_data(temp.fresh.NT)),
+                 "; fish species = ",
+                 length(unique(sample_data(temp.fresh.NT)$host_species))),
+            sep = "; ",
+            color = "temperature_C", 
+            size = 2, 
+            add = "reg.line", 
+            conf.int = TRUE, 
+            cor.coef = TRUE,
+            legend = "none",
+            add.params = list(color = "black", fill = "lightgray"),
+            cor.coeff.args = list(method = "spearman", 
+                                  label.x.npc = "left", 
+                                  label.y.npc = "top", 
+                                  size = 4,
+                                  geom = "label")) + 
+  gradient_color(c("blue", "red"))
+```
+```{r F5 Temperature salt}
+#### salt ###
+temp.salt <- subset_samples(ps.tran, water.cond == "saltwater" & !is.na(temperature_C))
+
+temp.salt <- prune_taxa(taxa_sums(temp.salt) > 0, temp.salt)
+
+wunifrac.temp.salt <- phyloseq::distance(temp.salt, method = "wunifrac")
+wunifrac.pcoa.temp.salt <- phyloseq::ordinate(temp.salt, method = "PCoA", distance = wunifrac.temp.salt)
+
+adonis.temp.salt <- adonis2(wunifrac.temp.salt ~ temperature_C, data = data.frame(sample_data(temp.salt)), permutations = 999, by = "term")
+
+#anosim.temp.salt <- anosim(wunifrac.temp.salt, data.frame(sample_data(temp.salt))$temperature_C, permutations = 999)
+
+salt.temp.p <- plot_ordination(temp.salt, wunifrac.pcoa.temp.salt, type = "samples", color = "temperature_C") +
+  geom_point(size=3) +
+  scale_colour_gradient(low = "blue", high = "red", na.value=alpha("#DEDEDE", 0.1)) +
+  ggtitle(paste0("Temperature beta diversity \nSamples = ",
+                 nrow(sample_data(temp.salt)),
+                 "; fish species = ",
+                 length(unique(sample_data(temp.salt)$host_species)))) +
+  labs(color = "캜") +
+  theme_bw()
+
+salt.temp.p.stats <- salt.temp.p +
+  annotate(geom = "label", 
+            label = paste0("PERMANOVA R� = ", format(round(adonis.temp.salt$R2[1], digits=2), nsmall = 2), 
+                          "; p < ", adonis.temp.salt$`Pr(>F)`[1]), 
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+### alpha ###
+temp.salt.NT <- subset_samples(ps, water.cond == "saltwater" & !is.na(temperature_C))
+
+temp.salt.NT <- prune_taxa(taxa_sums(temp.salt.NT) > 0, temp.salt.NT)
+
+temp.salt.NT.shannon <- estimate_richness(temp.salt.NT, measures = "Shannon") %>%
+  filter(Shannon > 0)
+
+temp.salt.NT.meta <- data.frame(sample_data(temp.salt.NT)) %>%
+  rownames_to_column(var = "Sample")
+
+temp.salt.NT.shannon.p <- temp.salt.NT.shannon %>%
+  rownames_to_column(var = "Sample") %>%
+  inner_join(temp.salt.NT.meta, by = "Sample") %>%
+  select(Shannon, Sample, temperature_C, host_species) %>%
+  ggscatter(., 
+            x = "temperature_C", 
+            y = "Shannon",
+            ylab = "Shannon Diversity",
+            xlab = "Temperature (캜)",
+            title = paste0("Temperature alpha diversity\nSamples = ",
+                 nrow(sample_data(temp.salt.NT)),
+                 "; fish species = ",
+                 length(unique(sample_data(temp.salt.NT)$host_species))),
+            sep = "; ", 
+            color = "temperature_C", 
+            size = 2, 
+            add = "reg.line", 
+            conf.int = TRUE, 
+            cor.coef = TRUE,
+            legend = "none",
+            add.params = list(color = "black", fill = "lightgray"),
+            cor.coeff.args = list(method = "spearman", 
+                                  label.x.npc = "left", 
+                                  label.y.npc = "top", 
+                                  size = 4,
+                                  geom = "label")) + 
+  gradient_color(c("blue", "red"))
+```
+```{r F4 Cond fresh}
+cond.fresh <- subset_samples(ps.tran, water.cond %in% c("freshwater", "saline") & !is.na(conductivity_uS_cm.1))
+
+cond.fresh <- prune_taxa(taxa_sums(cond.fresh) > 0, cond.fresh)
+
+wunifrac.cond.fresh <- phyloseq::distance(cond.fresh, method = "wunifrac")
+wunifrac.pcoa.cond.fresh <- phyloseq::ordinate(cond.fresh, method = "PCoA", distance = wunifrac.cond.fresh)
+
+adonis.cond.fresh <- adonis2(wunifrac.cond.fresh ~ conductivity_uS_cm.1, data = data.frame(sample_data(cond.fresh)), permutations = 999, by = "term")
+
+fresh.cond.p <- plot_ordination(cond.fresh, wunifrac.pcoa.cond.fresh, type = "samples", color = "conductivity_uS_cm.1") +
+  geom_point(size=3) +
+  scale_colour_gradient(low = "blue", high = "red", na.value=alpha("#DEDEDE", 0.1)) +
+  ggtitle(paste0("Conductivity beta diviersity\nSamples = ",
+                 nrow(sample_data(cond.fresh)),
+                 "; fish species = ",
+                 length(unique(sample_data(cond.fresh)$host_species)))) +
+  labs(color="킪/cm") +
+    theme_bw()
+
+
+fresh.cond.p.stats <- fresh.cond.p +
+  annotate(geom = "label", 
+            label = paste0("PERMANOVA R� = ", format(round(adonis.cond.fresh$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ", adonis.cond.fresh$`Pr(>F)`[1]), 
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+### alpha ###
+
+cond.fresh.NT <- subset_samples(ps, water.cond %in% c("freshwater", "saline") & !is.na(conductivity_uS_cm.1))
+
+cond.fresh.NT <- prune_taxa(taxa_sums(cond.fresh.NT) > 0, cond.fresh.NT)
+
+cond.fresh.NT.shannon <- estimate_richness(cond.fresh.NT, measures = "Shannon")
+
+cond.fresh.NT.meta <- data.frame(sample_data(cond.fresh.NT)) %>%
+  rownames_to_column(var = "Sample")
+
+cond.fresh.NT.shannon.p <- cond.fresh.NT.shannon %>%
+  rownames_to_column(var = "Sample") %>%
+  inner_join(cond.fresh.NT.meta, by = "Sample") %>%
+  select(Shannon, Sample, conductivity_uS_cm.1, host_species) %>%
+  ggscatter(., 
+            x = "conductivity_uS_cm.1", 
+            y = "Shannon",
+            ylab = "Shannon Diversity",
+            xlab = "Conductivity (??S/cm)",
+            title = paste0("Conductivity alpha diversity\nSamples = ",
+                 nrow(sample_data(cond.fresh.NT)),
+                 "; fish species = ",
+                 length(unique(sample_data(cond.fresh.NT)$host_species))),
+            sep = "; ", 
+            color = "conductivity_uS_cm.1", 
+            size = 2, 
+            add = "reg.line", 
+            conf.int = TRUE, 
+            cor.coef = TRUE,
+            legend = "none",
+            add.params = list(color = "black", fill = "lightgray"),
+            cor.coeff.args = list(method = "spearman", 
+                                  label.x.npc = "left", 
+                                  label.y.npc = "top", 
+                                  size = 4,
+                                  geom = "label")) + 
+  gradient_color(c("blue", "red"))
+# no salt sa measure as PSU
+```
+```{r F5 PSU salt}
+## no fresh cos conductivity
+PSU.salt <- subset_samples(ps.tran, water.cond == "saltwater" & !is.na(salinity_PSU))
+
+PSU.salt <- prune_taxa(taxa_sums(PSU.salt) > 0, PSU.salt)
+
+wunifrac.PSU.salt <- phyloseq::distance(PSU.salt, method = "wunifrac")
+wunifrac.pcoa.PSU.salt <- phyloseq::ordinate(PSU.salt, method = "PCoA", distance = wunifrac.PSU.salt)
+
+adonis.PSU.salt <- adonis2(wunifrac.PSU.salt ~ salinity_PSU, data = data.frame(sample_data(PSU.salt)), permutations = 999, by = "term")
+
+salt.PSU.p <- plot_ordination(PSU.salt, wunifrac.pcoa.PSU.salt, type = "samples", color = "salinity_PSU") +
+  geom_point(size=3) +
+  scale_colour_gradient(low = "blue", high = "red", na.value=alpha("#DEDEDE", 0.1)) +
+  ggtitle(paste0("Salinity beta diversity\nSamples = ",
+                 nrow(sample_data(PSU.salt)),
+                 "; fish species = ",
+                 length(unique(sample_data(PSU.salt)$host_species)))) + 
+  labs(color = "PSU/ppt") +
+  theme_bw()
+  
+salt.PSU.p.stats <- salt.PSU.p +
+  annotate(geom = "label", 
+            label = paste0("PERMANOVA R� = ", format(round(adonis.PSU.salt$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ", adonis.PSU.salt$`Pr(>F)`[1]), 
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+
+
+PSU.salt.NT <- subset_samples(ps, water.cond == "saltwater" & !is.na(salinity_PSU))
+
+PSU.salt.NT <- prune_taxa(taxa_sums(PSU.salt.NT) > 0, PSU.salt.NT)
+
+PSU.salt.NT.shannon <- estimate_richness(PSU.salt.NT, measures = "Shannon")
+
+PSU.salt.NT.meta <- data.frame(sample_data(PSU.salt.NT)) %>%
+  rownames_to_column(var = "Sample")
+
+PSU.salt.NT.shannon.p <- PSU.salt.NT.shannon %>%
+  rownames_to_column(var = "Sample") %>%
+  inner_join(PSU.salt.NT.meta, by = "Sample") %>%
+  select(Shannon, Sample, salinity_PSU, host_species) %>%
+  ggscatter(., 
+            x = "salinity_PSU", 
+            y = "Shannon",
+            ylab = "Shannon Diversity",
+            xlab = "Salinity (PSU)",
+            title = paste0("Salinity alpha diversity\nSamples = ",
+                 nrow(sample_data(PSU.salt.NT)),
+                 "; fish species = ",
+                 length(unique(sample_data(PSU.salt.NT)$host_species))),
+            sep = "; ", 
+            color = "salinity_PSU", 
+            size = 2, 
+            add = "reg.line", 
+            conf.int = TRUE, 
+            cor.coef = TRUE,
+            legend = "none",
+            add.params = list(color = "black", fill = "lightgray"),
+            cor.coeff.args = list(method = "spearman", 
+                                  label.x.npc = "left", 
+                                  label.y.npc = "top", 
+                                  size = 4,
+                                  geom = "label")) + 
+  gradient_color(c("blue", "red"))
+```
+```{r F4 pH fresh}
+pH.fresh <- subset_samples(ps.tran, water.cond %in% c("freshwater", "saline") & !is.na(pH))
+
+pH.fresh <- prune_taxa(taxa_sums(pH.fresh) > 0, pH.fresh)
+
+wunifrac.pH.fresh <- phyloseq::distance(pH.fresh, method = "wunifrac")
+wunifrac.pcoa.pH.fresh <- phyloseq::ordinate(pH.fresh, method = "PCoA", distance = wunifrac.pH.fresh)
+
+adonis.pH.fresh <- adonis2(wunifrac.pH.fresh ~ pH, data = data.frame(sample_data(pH.fresh)), permutations = 999, by = "term")
+
+fresh.pH.p <- plot_ordination(pH.fresh, wunifrac.pcoa.pH.fresh, type = "samples", color = "pH") +
+  geom_point(size=3) +
+  scale_colour_gradient(low = "blue", high = "red", na.value=alpha("#DEDEDE", 0.1)) +
+  ggtitle(paste0("pH beta diversity\nSamples = ",
+                 nrow(sample_data(pH.fresh)),
+                 "; fish species = ",
+                 length(unique(sample_data(pH.fresh)$host_species)))) + 
+  labs(color = "pH") +
+  theme_bw()
+
+fresh.pH.p.stats <- fresh.pH.p +
+  annotate(geom = "label", 
+            label = paste0("PERMANOVA R� = ", format(round(adonis.pH.fresh$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ", adonis.pH.fresh$`Pr(>F)`[1]), 
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+### alpha diversity ###
+
+pH.fresh.NT <- subset_samples(ps,  water.cond %in% c("freshwater", "saline") & !is.na(pH))
+
+pH.fresh.NT <- prune_taxa(taxa_sums(pH.fresh.NT) > 0, pH.fresh.NT)
+
+pH.fresh.NT.shannon <- estimate_richness(pH.fresh.NT, measures = "Shannon")
+
+pH.fresh.NT.meta <- data.frame(sample_data(pH.fresh.NT)) %>%
+  rownames_to_column(var = "Sample")
+
+pH.fresh.NT.shannon.p <- pH.fresh.NT.shannon %>%
+  rownames_to_column(var = "Sample") %>%
+  inner_join(pH.fresh.NT.meta, by = "Sample") %>%
+  select(Shannon, Sample, pH, host_species) %>%
+  ggscatter(., 
+            x = "pH", 
+            y = "Shannon",
+            ylab = "Shannon Diversity",
+            xlab = "pH",
+            title = paste0("pH alpha diversity\nSamples = ",
+                 nrow(sample_data(pH.fresh.NT)),
+                 "; fish species = ",
+                 length(unique(sample_data(pH.fresh.NT)$host_species))),
+            sep = "; ",
+            color = "pH", 
+            size = 2, 
+            add = "reg.line", 
+            conf.int = TRUE, 
+            cor.coef = TRUE,
+            legend = "none",
+            add.params = list(color = "black", fill = "lightgray"),
+            cor.coeff.args = list(method = "spearman", 
+                                  label.x.npc = "left", 
+                                  label.y.npc = "top", 
+                                  size = 4,
+                                  geom = "label")) + 
+  gradient_color(c("blue", "red"))
+```
+```{r F5 pH salt}
+pH.salt <- subset_samples(ps.tran, water.cond == "saltwater" & !is.na(pH))
+
+pH.salt <- prune_taxa(taxa_sums(pH.salt) > 0, pH.salt)
+
+wunifrac.pH.salt <- phyloseq::distance(pH.salt, method = "wunifrac")
+wunifrac.pcoa.pH.salt <- phyloseq::ordinate(pH.salt, method = "PCoA", distance = wunifrac.pH.salt)
+
+adonis.pH.salt <- adonis2(wunifrac.pH.salt ~ pH, data = data.frame(sample_data(pH.salt)), permutations = 999, by = "term")
+
+salt.pH.p <- plot_ordination(pH.salt, wunifrac.pcoa.pH.salt, type = "samples", color = "pH") +
+  geom_point(size=3) +
+  scale_colour_gradient(low = "blue", high = "red", na.value=alpha("#DEDEDE", 0.1)) +
+  ggtitle(paste0("pH beta diverisity\nSamples = ",
+                 nrow(sample_data(pH.salt)),
+                 "; fish species = ",
+                 length(unique(sample_data(pH.salt)$host_species)))) +
+  labs(color = "pH") +
+  theme_bw()
+
+salt.pH.p.stats <- salt.pH.p +
+  annotate(geom = "label", 
+            label = paste0("PERMANOVA R� = ", format(round(adonis.pH.salt$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ", adonis.pH.salt$`Pr(>F)`[1]), 
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+### alpha diversity ###
+
+pH.salt.NT <- subset_samples(ps,  water.cond == "saltwater" & !is.na(pH))
+
+pH.salt.NT <- prune_taxa(taxa_sums(pH.salt.NT) > 0, pH.salt.NT)
+
+pH.salt.NT.shannon <- estimate_richness(pH.salt.NT, measures = "Shannon")
+
+pH.salt.NT.meta <- data.frame(sample_data(pH.salt.NT)) %>%
+  rownames_to_column(var = "Sample")
+
+pH.salt.NT.shannon.p <- pH.salt.NT.shannon %>%
+  rownames_to_column(var = "Sample") %>%
+  inner_join(pH.salt.NT.meta, by = "Sample") %>%
+  select(Shannon, Sample, pH, host_species) %>%
+  ggscatter(., 
+            x = "pH", 
+            y = "Shannon",
+            ylab = "Shannon Diversity",
+            xlab = "pH",
+            title = paste0("pH alpha diversity\nSamples = ",
+                 nrow(sample_data(pH.salt.NT)),
+                 "; fish species = ",
+                 length(unique(sample_data(pH.salt.NT)$host_species))),
+            sep = "; ",
+            color = "pH", 
+            size = 2, 
+            add = "reg.line", 
+            conf.int = TRUE, 
+            cor.coef = TRUE,
+            legend = "none",
+            add.params = list(color = "black", fill = "lightgray"),
+            cor.coeff.args = list(method = "spearman", 
+                                  label.x.npc = "left", 
+                                  label.y.npc = "top", 
+                                  size = 4,
+                                  geom = "label")) + 
+  gradient_color(c("blue", "red"))
+```
+```{r F4 dO2 fresh}
+dO2.fresh <- subset_samples(ps.tran, water.cond %in% c("freshwater", "saline") & !is.na(dO2_mg_L.1))
+
+dO2.fresh <- prune_taxa(taxa_sums(dO2.fresh) > 0, dO2.fresh)
+
+wunifrac.dO2.fresh <- phyloseq::distance(dO2.fresh, method = "wunifrac")
+wunifrac.pcoa.dO2.fresh <- phyloseq::ordinate(dO2.fresh, method = "PCoA", distance = wunifrac.dO2.fresh)
+
+adonis.dO2.fresh <- adonis2(wunifrac.dO2.fresh ~ dO2_mg_L.1, data = data.frame(sample_data(dO2.fresh)), permutations = 999, by = "term")
+
+fresh.dO2.p <- plot_ordination(dO2.fresh, wunifrac.pcoa.dO2.fresh, type = "samples", color = "dO2_mg_L.1") +
+  geom_point(size=3) +
+  scale_colour_gradient(low = "blue", high = "red", na.value=alpha("#DEDEDE", 0.1)) +
+  labs(color = "mg/L") +
+  ggtitle(paste0("Dissolved oxygen beta diversity\nSamples = ",
+                 nrow(sample_data(dO2.fresh)),
+                 "; fish species = ",
+                 length(unique(sample_data(dO2.fresh)$host_species)))) +
+  theme_bw()
+  
+fresh.dO2.p.stats <- fresh.dO2.p +
+  annotate(geom = "label", 
+            label = paste0("PERMANOVA R� = ", format(round(adonis.dO2.fresh$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ", adonis.dO2.fresh$`Pr(>F)`[1]), 
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+### alpha diversity ###
+
+dO2.fresh.NT <- subset_samples(ps, water.cond %in% c("freshwater", "saline") & !is.na(dO2_mg_L.1))
+
+dO2.fresh.NT <- prune_taxa(taxa_sums(dO2.fresh.NT) > 0, dO2.fresh.NT)
+
+dO2.fresh.NT.shannon <- estimate_richness(dO2.fresh.NT, measures = "Shannon")
+
+dO2.fresh.NT.meta <- data.frame(sample_data(dO2.fresh.NT)) %>%
+  rownames_to_column(var = "Sample")
+
+dO2.fresh.NT.shannon.p <- dO2.fresh.NT.shannon %>%
+  rownames_to_column(var = "Sample") %>%
+  inner_join(dO2.fresh.NT.meta, by = "Sample") %>%
+  select(Shannon, Sample, dO2_mg_L.1, host_species) %>%
+  ggscatter(., 
+            x = "dO2_mg_L.1", 
+            y = "Shannon",
+            ylab = "Shannon Diversity",
+            xlab = "Dissolved Oxygen Concentration (mg/L)",
+            title = paste0("Dissolved oxygen alpha diversity\nSamples = ",
+                 nrow(sample_data(dO2.fresh.NT)),
+                 "; fish species = ",
+                 length(unique(sample_data(dO2.fresh.NT)$host_species))),
+            color = "dO2_mg_L.1", 
+            size = 2, 
+            add = "reg.line", 
+            conf.int = TRUE, 
+            cor.coef = TRUE,
+            legend = "none",
+            sep = " ; ",
+            add.params = list(color = "black", fill = "lightgray"),
+            cor.coeff.args = list(method = "spearman", 
+                                  label.x.npc = "left", 
+                                  label.y.npc = "top", 
+                                  size = 4,
+                                  geom = "label")) + 
+  gradient_color(c("blue", "red"))
+```
+```{r F5 dO2 salt}
+dO2.salt <- subset_samples(ps.tran, water.cond == "saltwater" & !is.na(dO2_mg_L.1))
+
+dO2.salt <- prune_taxa(taxa_sums(dO2.salt) > 0, dO2.salt)
+
+wunifrac.dO2.salt <- phyloseq::distance(dO2.salt, method = "wunifrac")
+wunifrac.pcoa.dO2.salt <- phyloseq::ordinate(dO2.salt, method = "PCoA", distance = wunifrac.dO2.salt)
+
+adonis.dO2.salt <- adonis2(wunifrac.dO2.salt ~ dO2_mg_L.1, data = data.frame(sample_data(dO2.salt)), permutations = 999, by = "term")
+
+salt.dO2.p <- plot_ordination(dO2.salt, wunifrac.pcoa.dO2.salt, type = "samples", color = "dO2_mg_L.1") +
+  geom_point(size=3) +
+  scale_colour_gradient(low = "blue", high = "red", na.value=alpha("#DEDEDE", 0.1)) +
+  labs(color = "mg/L") + 
+  ggtitle(paste0("Dissolved oxygen beta diversity\nSamples = ",
+                 nrow(sample_data(dO2.salt)),
+                 "; fish species = ",
+                 length(unique(sample_data(dO2.salt)$host_species)))) +
+  theme_bw()
+
+salt.dO2.p.stats <- salt.dO2.p +
+  annotate(geom = "label", 
+            label = paste0("PERMANOVA R� = ", round(adonis.dO2.salt$R2[1], 2), 
+                          "; p < ", adonis.dO2.salt$`Pr(>F)`[1]), 
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+### alpha ###
+
+dO2.salt.NT <- subset_samples(ps, water.cond == "saltwater" & !is.na(dO2_mg_L.1))
+
+dO2.salt.NT <- prune_taxa(taxa_sums(dO2.salt.NT) > 0, dO2.salt.NT)
+
+dO2.salt.NT.shannon <- estimate_richness(dO2.salt.NT, measures = "Shannon")
+
+dO2.salt.NT.meta <- data.frame(sample_data(dO2.salt.NT)) %>%
+  rownames_to_column(var = "Sample")
+
+dO2.salt.NT.shannon.p <- dO2.salt.NT.shannon %>%
+  rownames_to_column(var = "Sample") %>%
+  inner_join(dO2.salt.NT.meta, by = "Sample") %>%
+  select(Shannon, Sample, dO2_mg_L.1, host_species) %>%
+  ggscatter(., 
+            x = "dO2_mg_L.1", 
+            y = "Shannon",
+            ylab = "Shannon Diversity",
+            xlab = "Dissolved Oxygen Concentration (mg/L)",
+            title = paste0("Dissolved oxygen alpha diversity\nSamples = ",
+                 nrow(sample_data(dO2.salt.NT)),
+                 "; fish species = ",
+                 length(unique(sample_data(dO2.salt.NT)$host_species))),
+            color = "dO2_mg_L.1", 
+            size = 2, 
+            add = "reg.line", 
+            conf.int = TRUE, 
+            cor.coef = TRUE,
+            sep = " ; ",
+            legend = "none",
+            add.params = list(color = "black", fill = "lightgray"),
+            cor.coeff.args = list(method = "spearman", 
+                                  label.x.npc = "left", 
+                                  label.y.npc = "top", 
+                                  size = 4,
+                                  geom = "label")) + 
+  gradient_color(c("blue", "red"))
+```
+```{r Figure 4 and 5 combined}
+
+setwd("C:/Users/agb214/OneDrive - University of Exeter/PhD/fish_16S/")
+
+ggarrange(temp.fresh.NT.shannon.p, fresh.temp.p.stats, 
+          cond.fresh.NT.shannon.p, fresh.cond.p.stats, 
+          pH.fresh.NT.shannon.p, fresh.pH.p.stats, 
+          dO2.fresh.NT.shannon.p, fresh.dO2.p.stats,
+          nrow = 2, ncol = 4, labels = "AUTO")
+
+ggarrange(temp.salt.NT.shannon.p, salt.temp.p.stats, 
+          PSU.salt.NT.shannon.p, salt.PSU.p.stats, 
+          pH.salt.NT.shannon.p, salt.pH.p.stats, 
+          dO2.salt.NT.shannon.p, salt.dO2.p.stats,
+          nrow = 2, ncol = 4, labels = "AUTO")
+
+# export as  1800 X 900 px size
+```
+```{r Sup Figure 1 Rel abund Pres Abs}
+
+### Which taxa core in all fish host ###
+
+# get sample data table subsetted with relevant data
+sampledata <- sample_data(ps.tran) %>%
+  data.frame %>%
+  select(host_order, host_species, water.cond) %>%
+  rownames_to_column(var = "Sample")
+
+# only fish species samples with at least 1 replicate are used in the analysis
+abundant_hosts <- names(summary(sampledata$host_species)[summary(sampledata$host_species) > 1])
+
+# filter samples by relevant metadata subsets
+saltwater <- sampledata %>%
+  filter(water.cond == "saltwater")
+
+freshwater <- sampledata %>%
+  filter(water.cond %in% c("freshwater", "saline"))
+
+estuarine <- sampledata %>%
+  filter(water.cond == "estuarine")
+
+###################
+#### Genus ########
+###################
+
+# join taxa table with ASVs so we know which ASV belongs to which genera
+tax.ASV.table <- # join tax and OTU table
+  inner_join(rownames_to_column(data.frame(tax_table(ps.tran)), var = "ASVs"),
+                            rownames_to_column(data.frame(otu_table(ps.tran)), var = "ASVs"),
+                            by = "ASVs") %>% 
+  #remove by bacterial taxa too big or small to analyse
+  select(-Kingdom, -Species, -ASVs)
+
+### create our taxa tables by collapsing ASVs to different taxonomic levels and with appropreate metadata
+gen.tax.ASV.table <- tax.ASV.table %>%
+  # Just get genera and ASV abundances
+  select(-Phylum, -Class, -Order, -Family) %>%
+  # remove taxa with no genus classification
+  filter(!is.na(Genus)) %>%
+  group_by(Genus) %>%
+  # collapse ASVs by genus
+  summarise_all(.funs = sum) %>%
+  # transpose dataframe with sample names as rownames
+  column_to_rownames(var = "Genus") %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  left_join(sampledata, by = "Sample") %>%
+  column_to_rownames(var = "Sample") %>%
+  pivot_longer(cols = c(-host_order, -host_species, -water.cond), names_to = "taxa", values_to = "rel.abund") %>%
+  mutate(taxon_level = "Genus") %>%
+  mutate(taxa = paste0("G__", taxa))
+
+fam.tax.ASV.table <- tax.ASV.table %>%
+  # Just get genera and ASV abundances
+  select(-Phylum, -Class, -Order, -Genus) %>%
+  # remove taxa with no genus classification
+  filter(!is.na(Family)) %>%
+  group_by(Family) %>%
+  # collapse ASVs by genus
+  summarise_all(.funs = sum) %>%
+  # transpose dataframe with sample names as rownames
+  column_to_rownames(var = "Family") %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  left_join(sampledata, by = "Sample") %>%
+  column_to_rownames(var = "Sample") %>%
+  pivot_longer(cols = c(-host_order, -host_species, -water.cond), names_to = "taxa", values_to = "rel.abund") %>%
+  mutate(taxon_level = "Family") %>%
+  mutate(taxa = paste0("F__", taxa))
+
+ord.tax.ASV.table <- tax.ASV.table %>%
+  # Just get genera and ASV abundances
+  select(-Phylum, -Class, -Family, -Genus) %>%
+  # remove taxa with no genus classification
+  filter(!is.na(Order)) %>%
+  group_by(Order) %>%
+  # collapse ASVs by genus
+  summarise_all(.funs = sum) %>%
+  # transpose dataframe with sample names as rownames
+  column_to_rownames(var = "Order") %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  left_join(sampledata, by = "Sample") %>%
+  column_to_rownames(var = "Sample") %>%
+  pivot_longer(cols = c(-host_order, -host_species, -water.cond), names_to = "taxa", values_to = "rel.abund") %>%
+  mutate(taxon_level = "Order") %>%
+  mutate(taxa = paste0("O__", taxa))
+
+cla.tax.ASV.table <- tax.ASV.table %>%
+  # Just get genera and ASV abundances
+  select(-Phylum, -Order, -Family, -Genus) %>%
+  # remove taxa with no genus classification
+  filter(!is.na(Class)) %>%
+  group_by(Class) %>%
+  # collapse ASVs by genus
+  summarise_all(.funs = sum) %>%
+  # transpose dataframe with sample names as rownames
+  column_to_rownames(var = "Class") %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  left_join(sampledata, by = "Sample") %>%
+  column_to_rownames(var = "Sample") %>%
+  pivot_longer(cols = c(-host_order, -host_species, -water.cond), names_to = "taxa", values_to = "rel.abund") %>%
+  mutate(taxon_level = "Class") %>%
+  mutate(taxa = paste0("C__", taxa))
+
+phy.tax.ASV.table <- tax.ASV.table %>%
+  # Just get genera and ASV abundances
+  select(-Class, -Order, -Family, -Genus) %>%
+  # remove taxa with no genus classification
+  filter(!is.na(Phylum)) %>%
+  group_by(Phylum) %>%
+  # collapse ASVs by genus
+  summarise_all(.funs = sum) %>%
+  # transpose dataframe with sample names as rownames
+  column_to_rownames(var = "Phylum") %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  left_join(sampledata, by = "Sample") %>%
+  column_to_rownames(var = "Sample") %>%
+  pivot_longer(cols = c(-host_order, -host_species, -water.cond), names_to = "taxa", values_to = "rel.abund") %>%
+  mutate(taxon_level = "Phylum") %>%
+  mutate(taxa = paste0("P__", taxa))
+
+### Now lets put this all back into one master table
+
+tax.table <- rbind(gen.tax.ASV.table, fam.tax.ASV.table, cla.tax.ASV.table, ord.tax.ASV.table, phy.tax.ASV.table) %>%
+  filter(host_species %in% abundant_hosts) %>% 
+  mutate(pres.abs = if_else(rel.abund > 0, 1, 0))
+
+### we need to split this by freshwater/estuarine/saltwater as fish might have very different microbiomes because of this
+
+### first we need the phylo tree to order host species by
+setwd("C:/Users/agb214/OneDrive - University of Exeter/PhD/fish_16S/")
+host_tree <- read.tree("data/summarised_lineage_phylip_tree.phy")
+labels(host_tree) <- gsub(pattern = "\'", replacement = "", labels(host_tree))
+
+top.rel.ab.fresh.names <- tax.table %>%
+  # saline waters considered fresh as uS/cm < 10,000. 
+  filter(water.cond %in% c("freshwater", "saline")) %>%
+  # find mean rel abundances for the same genus in each host order. This means that fish species with many replicates (salmon) don't tilt relative abundances towards themselves. Its like putting a weighting on each sample based on the number of replicates. Done at host order level rather then species as some fish genus / family are overrepresented. 
+  group_by(taxon_level, host_order, taxa) %>%
+  summarise(mean.RA.taxa.order = mean(rel.abund), .groups = "drop") %>%
+  # now we have relative abundance of bacterial genus by host order, find the relative abundance of genus across the entire dataset (what is the abundance of Alphaproteobacteria across all fish orders rather the just by Cypriniformes)
+  group_by(taxon_level, taxa) %>%
+  summarise(mean.RA.all = mean(mean.RA.taxa.order), .groups = "drop_last") %>%
+  # find the names of the top bacterial taxa and only include the most abundant 5. In the case of a tie, pick all ties
+  slice_max(order_by = mean.RA.all, n = 5) %>%
+  ungroup()
+
+fresh.fish <- tax.table %>%
+  filter(water.cond %in% c("freshwater", "saline")) %>%
+  select(host_species) %>%
+  unique()
+
+fresh.not.found <- labels(host_tree)[labels(host_tree) %!in% fresh.fish$host_species]
+
+fresh.host_tree <- ape::drop.tip(host_tree, fresh.not.found)
+
+top.rel.ab.fresh <- tax.table %>%
+  filter(water.cond %in% c("freshwater", "saline")) %>%
+  filter(taxa %in% top.rel.ab.fresh.names$taxa) %>%
+  select(host_species, taxa, rel.abund) %>%
+  group_by(host_species, taxa) %>%
+  summarise(meanRA = mean(rel.abund), .groups = "drop") %>%
+  pivot_wider(names_from = "taxa", values_from = "meanRA") %>%
+  mutate(host_species = factor(host_species, levels = rev(labels(fresh.host_tree)))) %>%
+  arrange(host_species) %>%
+  column_to_rownames(var = "host_species") %>%
+  replace(., is.na(.), 0) %>%
+  relocate(starts_with(c("P__","C__","O__","F__","G__")))
+
+# Rename G__Burkholderia with something shorter and more reasonable to plot
+top.rel.ab.fresh <- top.rel.ab.fresh %>%
+  dplyr::rename(G__Burkholderia = G__Burkholderia.Caballeronia.Paraburkholderia)
+
+top.rel.ab.fresh.plot <- as.ggplot(
+  pheatmap(top.rel.ab.fresh, 
+           cluster_rows = F, cluster_cols = F, 
+           #color = viridis::viridis(n=256), 
+           gaps_col = c(5,10,15,20), 
+           main = "Freshwater relative abundance"))
+
+top.pres.abs.fresh.names <- tax.table %>%
+  filter(water.cond %in% c("freshwater", "saline")) %>%
+  group_by(taxon_level, host_order, taxa) %>%
+  summarise(mean.PA.taxa.order = mean(pres.abs), .groups = "drop") %>%
+  group_by(taxon_level, taxa) %>%
+  summarise(mean.PA.all = mean(mean.PA.taxa.order), .groups = "drop_last") %>%
+  slice_max(order_by = mean.PA.all, n = 5) %>%
+  ungroup()
+
+top.pres.abs.fresh <- tax.table %>%
+  filter(water.cond %in% c("freshwater", "saline")) %>%
+  filter(taxa %in% top.pres.abs.fresh.names$taxa) %>%
+  select(host_species, taxa, pres.abs) %>%
+  group_by(host_species, taxa) %>%
+  summarise(meanPA = mean(pres.abs), .groups = "drop") %>%
+  pivot_wider(names_from = "taxa", values_from = "meanPA") %>%
+  mutate(host_species = factor(host_species, levels = rev(labels(fresh.host_tree)))) %>%
+  arrange(host_species) %>%
+  column_to_rownames(var = "host_species") %>%
+  replace(., is.na(.), 0) %>%
+  relocate(starts_with(c("P__","C__","O__","F__","G__")))
+
+top.pres.abs.fresh.plot <- as.ggplot(
+  pheatmap(top.pres.abs.fresh, 
+           cluster_rows = F, cluster_cols = F, 
+           color = c("black", "red"), 
+           gaps_col = c(5,10,15,20), 
+           main = "Freshwater presence absence"))
+
+## saltwater waters
+top.rel.ab.salt.names <- tax.table %>%
+  filter(water.cond %in% c("saltwater")) %>%
+  group_by(taxon_level, host_order, taxa) %>%
+  summarise(mean.RA.taxa.order = mean(rel.abund), .groups = "drop") %>%
+  group_by(taxon_level, taxa) %>%
+  summarise(mean.RA.all = mean(mean.RA.taxa.order), .groups = "drop_last") %>%
+  slice_max(order_by = mean.RA.all, n = 5) %>%
+  ungroup()
+
+salt.fish <- tax.table %>%
+  filter(water.cond %in% c("saltwater")) %>%
+  select(host_species) %>%
+  unique()
+
+salt.not.found <- labels(host_tree)[labels(host_tree) %!in% salt.fish$host_species]
+
+salt.host_tree <- ape::drop.tip(host_tree, salt.not.found)
+
+top.rel.ab.salt <- tax.table %>%
+  filter(water.cond %in% c("saltwater")) %>%
+  filter(taxa %in% top.rel.ab.salt.names$taxa) %>%
+  select(host_species, taxa, rel.abund) %>%
+  group_by(host_species, taxa) %>%
+  summarise(meanRA = mean(rel.abund), .groups = "drop") %>%
+  pivot_wider(names_from = "taxa", values_from = "meanRA") %>%
+  mutate(host_species = factor(host_species, levels = rev(labels(salt.host_tree)))) %>%
+  arrange(host_species) %>%
+  column_to_rownames(var = "host_species") %>%
+  replace(., is.na(.), 0) %>%
+  relocate(starts_with(c("P__","C__","O__","F__","G__")))
+
+top.rel.ab.salt.plot <- as.ggplot(
+  pheatmap(top.rel.ab.salt, 
+           cluster_rows = F, cluster_cols = F, 
+           #color = viridis::viridis(n=256), 
+           gaps_col = c(5,10,15,20), 
+           main = "Saltwater relative abundance"))
+
+
+### rel abund ###
+
+top.pres.abs.salt.names <- tax.table %>%
+  filter(water.cond %in% c("saltwater")) %>%
+  group_by(taxon_level, host_order, taxa) %>%
+  summarise(mean.PA.taxa.order = mean(pres.abs), .groups = "drop") %>%
+  group_by(taxon_level, taxa) %>%
+  summarise(mean.PA.all = mean(mean.PA.taxa.order), .groups = "drop_last") %>%
+  slice_max(order_by = mean.PA.all, n = 5) %>%
+  ungroup()
+
+top.pres.abs.salt <- tax.table %>%
+  filter(water.cond %in% c("saltwater")) %>%
+  filter(taxa %in% top.pres.abs.salt.names$taxa) %>%
+  select(host_species, taxa, pres.abs) %>%
+  group_by(host_species, taxa) %>%
+  summarise(meanPA = mean(pres.abs), .groups = "drop") %>%
+  pivot_wider(names_from = "taxa", values_from = "meanPA") %>%
+  mutate(host_species = factor(host_species, levels = rev(labels(salt.host_tree)))) %>%
+  arrange(host_species) %>%
+  column_to_rownames(var = "host_species") %>%
+  replace(., is.na(.), 0) %>%
+  relocate(starts_with(c("P__","C__","O__","F__","G__")))
+
+top.pres.abs.salt.plot <- as.ggplot(
+  pheatmap(top.pres.abs.salt, 
+           cluster_rows = F, cluster_cols = F, 
+           color = c("black", "red"), 
+           gaps_col = c(5,10,15,20),
+           main = "Saltwater presence absence"))
+
+ggarrange(top.rel.ab.fresh.plot, top.pres.abs.fresh.plot,
+          top.rel.ab.salt.plot, top.pres.abs.salt.plot,
+          ncol = 2, nrow = 2, 
+          heights = c(1, 1.75),
+          align = "hv", 
+          labels = "AUTO")
+```
+```{r Sup Figure 2 and 3 Bac rel abund}
+# Join ASV taxa and host taxa data frames with ASV abundance
+tax.host.asv.composite <- data.frame(otu_table(ps)) %>%
+  rownames_to_column(var = "ASV") %>%
+  pivot_longer(!ASV, names_to = "Sample", values_to = "count") %>%
+  filter(count > 0) %>%
+  left_join(host, by = "Sample") %>%
+  left_join(total_tax, by = "ASV") %>%
+  filter(!is.na(host_species))
+
+HS_by_phylum <- tax.host.asv.composite %>%
+  select(host_order, count, Phylum) %>%
+  group_by(host_order, Phylum) %>%
+  summarise(count = sum(count), .groups = "drop_last") %>%
+  mutate(rel_abund = count/sum(count)*100) %>%
+  select(-count) %>%
+  ungroup()
+
+top_10_phylum <- HS_by_phylum %>%
+  group_by(Phylum) %>%
+  summarise(sum_rel_abund = sum(rel_abund)/length(unique(tax.host.asv.composite$host_order))) %>%
+  slice_max(sum_rel_abund, n = 10)
+
+X <- HS_by_phylum %>%
+  filter(Phylum %in% top_10_phylum$Phylum) %>%
+  group_by(host_order) %>%
+  group_modify(~add_row(., Phylum = "Not in top 10", 
+                        rel_abund = (100 - sum(.$rel_abund)),
+                        host_order = .$host_order)) %>%
+  arrange(rel_abund) %>%
+  mutate(Phylum = factor(Phylum, levels = Phylum)) %>%
+  ungroup()
+
+X <- data.frame(table(sample_data(ps)$host_order)) %>%
+  dplyr::rename(host_order = Var1) %>%
+  left_join(X, by = "host_order")
+
+median_rel_abund <- X %>%
+  group_by(Phylum) %>%
+  summarise(median_rel_abund = median(rel_abund))
+
+ggplot(X, aes(x = Phylum, y = rel_abund, fill = Phylum)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Paired") +
+  ylab("Relative abundance of bacteria phyla on fish skin microbiomes") +
+  geom_text(data = median_rel_abund, aes(x=Phylum, y=median_rel_abund, 
+                                  label = paste0(round(median_rel_abund, digits = 2), "%")), size = 4, vjust = -0.5) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust=1))
+
+ggplot(X, aes(x = Phylum, y = rel_abund, fill = Phylum)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Paired") +
+  ylab("Relative abundance of bacteria phyla on fish skin microbiomes") +
+  facet_wrap(~host_order + paste0("n = ", X$Freq)) +
+  geom_text(label = paste0(round(X$rel_abund, digits = 0), "%"), size = 2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust=1),
+        legend.position = "bottom")
+```
+```{r Sup Fig 4 tanglegrams}
+fresh <- subset_samples(ps.tran, water.cond == "freshwater") %>%
+  prune_samples(sample_sums(.) > 0, .)
+
+fresh.metadata <- fresh %>%
+  sample_data(.) %>%
+  data.frame()
+
+salt <- subset_samples(ps.tran, water.cond == "saltwater") %>%
+  prune_samples(sample_sums(.) > 0, .)
+
+salt.metadata <- salt %>%
+  sample_data(.) %>%
+  data.frame()
+
+#fresh.wunifrac.dist <- phyloseq::distance(fresh, method = "wunifrac")
+#saveRDS(fresh.wunifrac.dist, "data/fresh.wunifrac.dist.rds")
+fresh.wunifrac.dist <- readRDS("data/fresh.wunifrac.dist.rds")
+
+#salt.wunifrac.dist <- phyloseq::distance(salt, method = "wunifrac")
+#saveRDS(salt.wunifrac.dist, "data/salt.wunifrac.dist.rds")
+salt.wunifrac.dist <- readRDS("data/salt.wunifrac.dist.rds")
+
+BD.gen <- vegan::betadisper(salt.wunifrac.dist, salt.metadata$host_genus)
+
+cent.dend.gen <- data.frame(scores(BD.gen, "centroids")) %>% 
+  dist() %>% 
+  hclust(method = "ward.D") %>%
+  as.dendrogram() %>%
+  set("labels_to_char")
+
+gen <- read.tree("data/summarised_lineage_phylip_tree.phy")
+host.tree.gen <- drop.tip(gen, tip = gen$tip.label, trim.internal = FALSE)
+
+gen.not.found <- c(labels(host.tree.gen)[labels(host.tree.gen) %!in% labels(cent.dend.gen)], 
+                   labels(cent.dend.gen)[labels(cent.dend.gen) %!in% labels(host.tree.gen)])
+
+trm.host.tree.gen <- ape::drop.tip(host.tree.gen, gen.not.found)
+
+write.tree(trm.host.tree.gen, "data/gen_trm_summarised_lineage_phylip_tree.phy")
+
+### the prune function for dndextend doesn't remove leaves, so need to use APE to remove
+# cannot convert tree from phylo tree to dendrogram, has to be read from file
+
+trm.host.tree.gen <- ReadDendrogram("data/gen_trm_summarised_lineage_phylip_tree.phy")
+
+trm.host.tree.gen <- as.dendrogram(trm.host.tree.gen) %>%
+  set("labels_to_char")
+
+gen.dend.list <- dendlist(cent.dend.gen, trm.host.tree.gen) %>% 
+                     untangle(method = "labels")
+
+gen.cor.trees <- round(cor_cophenetic(gen.dend.list), 2)
+
+gen.entangled <- round(entanglement(gen.dend.list), 2)
+
+salt.p.gen <- gen.dend.list %>%
+  tanglegram(sort = F,
+             common_subtrees_color_lines = FALSE,
+             highlight_distinct_edges  = FALSE, 
+             highlight_branches_lwd = FALSE, 
+             margin_inner = 5, lab.cex = 0.5,
+             main_left = "PCoA centroids grouped by host genily",
+             main_right = "Lineage of host", 
+             main = paste0("Correlation : ", gen.cor.trees," Entanglement :", gen.entangled), cex_main = 1)
+
+###fresh ####
+fresh.BD.gen <- vegan::betadisper(fresh.wunifrac.dist, fresh.metadata$host_genus)
+
+BD.gen <- vegan::betadisper(fresh.wunifrac.dist, fresh.metadata$host_genus)
+
+cent.dend.gen <- data.frame(scores(BD.gen, "centroids")) %>% 
+  dist() %>% 
+  hclust(method = "ward.D") %>%
+  as.dendrogram() %>%
+  set("labels_to_char")
+
+gen <- read.tree("data/summarised_lineage_phylip_tree.phy")
+host.tree.gen <- drop.tip(gen, tip = gen$tip.label, trim.internal = FALSE)
+
+gen.not.found <- c(labels(host.tree.gen)[labels(host.tree.gen) %!in% labels(cent.dend.gen)], 
+                   labels(cent.dend.gen)[labels(cent.dend.gen) %!in% labels(host.tree.gen)])
+
+trm.host.tree.gen <- ape::drop.tip(host.tree.gen, gen.not.found)
+
+write.tree(trm.host.tree.gen, "data/gen_trm_summarised_lineage_phylip_tree.phy")
+
+### the prune function for dndextend doesn't remove leaves, so need to use APE to remove
+# cannot convert tree from phylo tree to dendrogram, has to be read from file
+
+trm.host.tree.gen <- ReadDendrogram("data/gen_trm_summarised_lineage_phylip_tree.phy")
+
+trm.host.tree.gen <- as.dendrogram(trm.host.tree.gen) %>%
+  set("labels_to_char")
+
+gen.dend.list <- dendlist(cent.dend.gen, trm.host.tree.gen) %>% 
+                     untangle(method = "labels")
+
+gen.cor.trees <- round(cor_cophenetic(gen.dend.list), 2)
+
+gen.entangled <- round(entanglement(gen.dend.list), 2)
+
+fresh.p.gen <- gen.dend.list %>%
+  tanglegram(sort = F,
+             common_subtrees_color_lines = FALSE,
+             highlight_distinct_edges  = FALSE, 
+             highlight_branches_lwd = FALSE, 
+             margin_inner = 5, lab.cex = 0.5,
+             main_left = "PCoA centroids grouped by host genus",
+             main_right = "Lineage of host", 
+             main = paste0("Correlation : ", gen.cor.trees,", Entanglement :", gen.entangled), cex_main = 1)
+
+# As these are not ggplots, I can't align them so used Affinity designer to place them in a grid with A and B to refer to each plot
+```
+```{r Sup Fig 5 (unclassified) Pomecentridae family / (order)}
+sampledata <- sample_data(ps) %>% data.frame()
+
+tax_count <- inner_join(
+  rownames_to_column(data.frame(tax_table(ps)), var = "ASVs"),
+  rownames_to_column(data.frame(otu_table(ps)), var = "ASVs"), 
+  by = "ASVs")
+
+# unclassified Pomacentridae family
+UPF.samples <- sample_data(ps) %>%
+  data.frame() %>%
+  filter(host_order == "unclassified Pomacentridae family") %>%
+  rownames()
+
+UPF.count.meta <- tax_count %>%
+  select(all_of(UPF.samples), Genus) %>%
+  group_by(Genus) %>%
+  summarise(across(everything(), sum), .groups = "drop") %>%
+  filter(!is.na(Genus)) %>%
+  column_to_rownames(var = "Genus")
+
+UPF.core <- UPF.count.meta > 0
+UPF.core <- rowSums(UPF.core) / length(colnames(UPF.core))
+UPF.core <- data.frame(UPF.core)
+UPF.core <- slice_max(UPF.core, order_by = UPF.core, n = 12, with_ties = F) %>% rownames()
+
+UPF.ASV.list <- list()
+for (ASV in UPF.core){
+  d <- UPF.count.meta[ASV, ] %>% 
+    data.frame() %>% 
+    gather("sample", "count") %>% 
+    mutate(Genus = ASV)
+  UPF.ASV.list[[ASV]] <- d
+}
+
+UPF.ASV.list <- do.call(rbind, UPF.ASV.list)
+rownames(UPF.ASV.list) <- NULL
+
+UPF.top.ASVs <- UPF.ASV.list %>%
+  inner_join(., rownames_to_column(sampledata, var = "sample"), by = "sample") %>%
+  select(Genus, count, host_order, BioProject, host_species, water.cond) %>%
+  filter(count > 0) %>%
+  filter(host_order == "unclassified Pomacentridae family")
+
+ggplot(UPF.top.ASVs, aes(x = BioProject, y = log2(count), 
+                     fill = host_species)) +
+  geom_boxplot() +
+  geom_dotplot(binaxis = "y", stackdir = "center", 
+               dotsize = 1, stackratio = 0.1) +
+  facet_wrap(~Genus) +
+  scale_fill_manual(values = clrs) +
+  theme_bw() +
+  guides(fill=guide_legend(title="Host Species")) +
+  xlab("BioProject") +
+  ylab("Log 2-fold Count") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+```{r Sup Fig 6 Perciformes}
+pec.samples <- sample_data(ps) %>%
+  data.frame() %>%
+  filter(host_order == "Perciformes") %>%
+  rownames()
+
+pec.count.meta <- tax_count %>%
+  select(all_of(pec.samples), Genus) %>%
+  group_by(Genus) %>%
+  summarise(across(everything(), sum), .groups = "drop") %>%
+  filter(!is.na(Genus)) %>%
+  column_to_rownames(var = "Genus")
+
+pec.core <- pec.count.meta > 0
+pec.core <- rowSums(pec.core) / length(colnames(pec.core))
+pec.core <- data.frame(pec.core)
+pec.core <- slice_max(pec.core, order_by = pec.core, n = 12, with_ties = F) %>% rownames()
+
+pec.ASV.list <- list()
+for (ASV in pec.core){
+  d <- pec.count.meta[ASV, ] %>% 
+    data.frame() %>% 
+    gather("sample", "count") %>% 
+    mutate(Genus = ASV)
+  pec.ASV.list[[ASV]] <- d
+}
+
+pec.ASV.list <- do.call(rbind, pec.ASV.list)
+rownames(pec.ASV.list) <- NULL
+
+pec.top.ASVs <- pec.ASV.list %>%
+  inner_join(., rownames_to_column(sampledata, var = "sample"), by = "sample") %>%
+  select(Genus, count, host_order, BioProject, host_species, water.cond) %>%
+  filter(count > 0) %>%
+  filter(host_order == "Perciformes")
+
+ggplot(pec.top.ASVs, aes(x = BioProject, y = log2(count), 
+                     fill = host_species)) +
+  geom_boxplot() +
+  geom_dotplot(binaxis = "y", stackdir = "center", 
+               dotsize = 1, stackratio = 0.1) +
+  facet_wrap(~Genus) +
+  scale_fill_manual(values = clrs) +
+  theme_bw() +
+  guides(fill=guide_legend(title="Host Species")) +
+  xlab("BioProject") +
+  ylab("Log 2-fold Count") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+```{r Sup Fig 7 Salmoniformes}
+# Salmoniformes order
+
+sal.samples <- sample_data(ps) %>%
+  data.frame() %>%
+  filter(host_order == "Salmoniformes") %>%
+  rownames()
+
+sal.count.meta <- tax_count %>%
+  select(all_of(sal.samples), Genus) %>%
+  group_by(Genus) %>%
+  summarise(across(everything(), sum), .groups = "drop") %>%
+  filter(!is.na(Genus)) %>%
+  column_to_rownames(var = "Genus")
+
+sal.core <- sal.count.meta > 0
+sal.core <- rowSums(sal.core) / length(colnames(sal.core))
+sal.core <- data.frame(sal.core)
+sal.core <- slice_max(sal.core, order_by = sal.core, n = 12, with_ties = F) %>% rownames()
+
+sal.ASV.list <- list()
+for (ASV in sal.core){
+  d <- sal.count.meta[ASV, ] %>% 
+    data.frame() %>% 
+    gather("sample", "count") %>% 
+    mutate(Genus = ASV)
+  sal.ASV.list[[ASV]] <- d
+}
+
+sal.ASV.list <- do.call(rbind, sal.ASV.list)
+rownames(sal.ASV.list) <- NULL
+
+sal.top.ASVs <- sal.ASV.list %>%
+  inner_join(., rownames_to_column(sampledata, var = "sample"), by = "sample") %>%
+  select(Genus, count, host_order, BioProject, host_species, water.cond) %>%
+  filter(count > 0) %>%
+  filter(host_order == "Salmoniformes")
+
+ggplot(sal.top.ASVs, aes(x = BioProject, y = log2(count), 
+                     fill = host_species)) +
+  geom_boxplot() +
+  geom_dotplot(binaxis = "y", stackdir = "center", 
+               dotsize = 1, stackratio = 0.1) +
+  facet_wrap(~Genus) +
+  scale_fill_manual(values = clrs) +
+  theme_bw() +
+  guides(fill=guide_legend(title="Host Species")) +
+  xlab("BioProject") +
+  ylab("Log 2-fold Count") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+```{r Sup Fig 8 Host species confounding variables}
+# But if you remove the host factors from each of the env factors, what is the R2?
+# Using the same wunifrac dist and subset phyloseq objs from Figures 4 and 5
+
+HS.clrs <- sample(rainbow(length(unique(get_variable(ps.tran, "host_species")))))
+names(HS.clrs) <- unique(get_variable(ps.tran, "host_species"))
+
+
+### fresh temp ###
+adonis.temp.fresh.margin <- adonis2(wunifrac.temp.fresh ~ host_species + temperature_C, data = data.frame(sample_data(temp.fresh)), permutations = 999, by = "margin")
+
+temp.fresh.host.p <- fresh.temp.p + 
+  stat_ellipse(geom = "polygon", alpha = 0.25, aes(fill = host_species)) +
+  guides(fill = guide_legend(title = "Host species")) +
+  scale_fill_manual(values = HS.clrs) +
+  annotate(geom = "label", 
+           label = paste0("Host species PERMANOVA R� = ", format(round(adonis.temp.fresh.margin$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ",
+                          adonis.temp.fresh.margin$`Pr(>F)`[1], 
+                           "\nTemperature PERMANOVA R� = ", format(round(adonis.temp.fresh.margin$R2[2], digits = 2), nsmall = 2),
+                           "; p < ",
+                          adonis.temp.fresh.margin$`Pr(>F)`[2]),
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+
+## salt temp ###
+adonis.temp.salt.margin <- adonis2(wunifrac.temp.salt ~ host_species + temperature_C, data = data.frame(sample_data(temp.salt)), permutations = 999, by = "margin")
+
+temp.salt.host.p <- salt.temp.p + 
+  stat_ellipse(geom = "polygon", alpha = 0.25, aes(fill = host_species)) +
+  guides(fill = guide_legend(title = "Host species")) +
+  scale_fill_manual(values = HS.clrs) +
+  annotate(geom = "label", 
+           label = paste0("Host species PERMANOVA R� = ", format(round(adonis.temp.salt.margin$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ",
+                          adonis.temp.salt.margin$`Pr(>F)`[1], 
+                           "\nTemperature PERMANOVA R� = ", format(round(adonis.temp.salt.margin$R2[2], digits = 2), nsmall = 2),
+                           "; p = ",
+                          adonis.temp.salt.margin$`Pr(>F)`[2]),
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+### fresh cond ###
+adonis.cond.fresh.margin <- adonis2(wunifrac.cond.fresh ~ host_species + conductivity_uS_cm.1, data = data.frame(sample_data(cond.fresh)), permutations = 999, by = "margin")
+
+cond.fresh.host.p <- fresh.cond.p + 
+  stat_ellipse(geom = "polygon", alpha = 0.25, aes(fill = host_species)) +
+  guides(fill = guide_legend(title = "Host species")) +
+  scale_fill_manual(values = HS.clrs) +
+  annotate(geom = "label", 
+           label = paste0("Host species PERMANOVA R� = ", format(round(adonis.cond.fresh.margin$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ",
+                          adonis.cond.fresh.margin$`Pr(>F)`[1], 
+                           "\nWater conductivity PERMANOVA R� = ", format(round(adonis.cond.fresh.margin$R2[2], digits = 2), nsmall = 2),
+                           "; p < ",
+                          adonis.cond.fresh.margin$`Pr(>F)`[2]),
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+## salt PSU ###
+
+adonis.PSU.salt.margin <- adonis2(wunifrac.PSU.salt ~ host_species + salinity_PSU, data = data.frame(sample_data(PSU.salt)), permutations = 999, by = "margin")
+
+PSU.salt.host.p <- salt.PSU.p + 
+  stat_ellipse(geom = "polygon", alpha = 0.25, aes(fill = host_species)) +
+  guides(fill = guide_legend(title = "Host species")) +
+  scale_fill_manual(values = HS.clrs) +
+  annotate(geom = "label", 
+           label = paste0("Host species PERMANOVA R� = ", format(round(adonis.PSU.salt.margin$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ",
+                          adonis.PSU.salt.margin$`Pr(>F)`[1], 
+                           "\nWater salinity PERMANOVA R� = ", format(round(adonis.PSU.salt.margin$R2[2], digits = 2), nsmall = 2),
+                           "; p < ",
+                          adonis.PSU.salt.margin$`Pr(>F)`[2]),
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+
+### fresh pH ###
+adonis.pH.fresh.margin <- adonis2(wunifrac.pH.fresh ~ host_species + pH, data = data.frame(sample_data(pH.fresh)), permutations = 999, by = "margin")
+
+pH.fresh.host.p <- fresh.pH.p + 
+  stat_ellipse(geom = "polygon", alpha = 0.25, aes(fill = host_species)) +
+  guides(fill = guide_legend(title = "Host species")) +
+  scale_fill_manual(values = HS.clrs) +
+  scale_fill_manual(values = HS.clrs) +
+  annotate(geom = "label", 
+           label = paste0("Host species PERMANOVA R� = ", format(round(adonis.pH.fresh.margin$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ",
+                          adonis.pH.fresh.margin$`Pr(>F)`[1], 
+                           "\nWater conductivity PERMANOVA R� = ", format(round(adonis.pH.fresh.margin$R2[2], digits = 2), nsmall = 2),
+                           "; p < ",
+                          adonis.pH.fresh.margin$`Pr(>F)`[2]),
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+### salt pH ###
+
+adonis.pH.salt.margin <- adonis2(wunifrac.pH.salt ~ host_species + pH, data = data.frame(sample_data(pH.salt)), permutations = 999, by = "margin")
+
+pH.salt.host.p <- salt.pH.p + 
+  stat_ellipse(geom = "polygon", alpha = 0.25, aes(fill = host_species)) +
+  guides(fill = guide_legend(title = "Host species")) +
+  scale_fill_manual(values = HS.clrs) +
+  annotate(geom = "label", 
+           label = paste0("Host species PERMANOVA R� = ", format(round(adonis.pH.salt.margin$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ",
+                          adonis.pH.salt.margin$`Pr(>F)`[1], 
+                           "\npH PERMANOVA R� = ", format(round(adonis.pH.salt.margin$R2[2], digits = 2), nsmall = 2),
+                           "; p < ",
+                          adonis.pH.salt.margin$`Pr(>F)`[2]),
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+### fresh dO2 ###
+adonis.dO2.fresh.margin <- adonis2(wunifrac.dO2.fresh ~ host_species + dO2_mg_L.1, data = data.frame(sample_data(dO2.fresh)), permutations = 999, by = "margin")
+
+dO2.fresh.host.p <- fresh.dO2.p + 
+  stat_ellipse(geom = "polygon", alpha = 0.25, aes(fill = host_species)) +
+  guides(fill = guide_legend(title = "Host species")) +
+  scale_fill_manual(values = HS.clrs) +
+  scale_fill_manual(values = HS.clrs) +
+  annotate(geom = "label", 
+           label = paste0("Host species PERMANOVA R� = ", format(round(adonis.dO2.fresh.margin$R2[1], digits = 2), nsmall = 2), 
+                          "; p < ",
+                          adonis.dO2.fresh.margin$`Pr(>F)`[1], 
+                           "\nWater dissolved oxygen PERMANOVA R� = ", format(round(adonis.dO2.fresh.margin$R2[2], digits = 2), nsmall = 2),
+                           "; p < ",
+                          adonis.dO2.fresh.margin$`Pr(>F)`[2]),
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+### salt dO2 ###
+
+adonis.dO2.salt.margin <- adonis2(wunifrac.dO2.salt ~ host_species + dO2_mg_L.1, data = data.frame(sample_data(dO2.salt)), permutations = 999, by = "margin")
+
+### Can't do salt dO2 because only 1 salt water fish recorded dO2
+
+dO2.salt.host.p <- salt.dO2.p + 
+  stat_ellipse(geom = "polygon", alpha = 0.25, aes(fill = host_species)) +
+  guides(fill = guide_legend(title = "Host species")) +
+  scale_fill_manual(values = HS.clrs) +
+  annotate(geom = "label", 
+           label = paste0("Host species PERMANOVA R� = NA; less than 2 species",
+                           "\nWater dissolved oxygen PERMANOVA R� = NA; less than 2 species"),
+            vjust = 1, hjust = 0, x=-Inf, y = Inf)
+
+
+ggarrange(temp.fresh.host.p, cond.fresh.host.p, pH.fresh.host.p, dO2.fresh.host.p, 
+          temp.salt.host.p, PSU.salt.host.p, pH.salt.host.p, dO2.salt.host.p, nrow = 2, ncol = 4, align = "hv", labels = "AUTO")
+#4375 x 1500
+```
+```{r Sup Fig 9 Salmon by water condition (salinity)}
+WC.clrs <- clrs[1:length(unique(get_variable(ps.tran, "water.cond")))]
+names(WC.clrs) <- unique(get_variable(ps.tran, "water.cond"))
+show_col(WC.clrs)
+
+salmon <- subset_samples(ps.tran, host_species == "Salmo salar")
+salmon <- subset_samples(salmon, BioProject != "PRJNA416707") #  remove study with only 1 ASV
+salmon <- prune_taxa(taxa_sums(salmon) > 0, salmon)
+sal.meta <- sample_data(salmon) %>% 
+  data.frame()
+  
+wunifrac.dist.sal <- phyloseq::distance(salmon, type = "samples", method = "wunifrac")
+
+wunifrac.dist.PCoA.sal <- phyloseq::ordinate(salmon, method = "PCoA", distance = wunifrac.dist.sal)
+
+adonis.sal <- adonis2(wunifrac.dist.sal ~ BioProject, data = sal.meta, permutations = 999, by = "term")
+
+adonis.sal.water.cond <- adonis2(wunifrac.dist.sal ~ water.cond, data = sal.meta, permutations = 999, by = "term")
+
+(salmon.study.p <- plot_ordination(salmon, wunifrac.dist.PCoA.sal, type = "samples", color = "water.cond") +
+  geom_point(size=3) +
+  scale_color_manual(name = "water.cond", values = WC.clrs, na.value=alpha("#DEDEDE", 0)) +
+  stat_ellipse(geom = "polygon", alpha = 0.2, aes(fill = BioProject), linewidth = 0.5) +
+  scale_fill_manual(name = "BioProject", values = BP.clrs, na.value=alpha("#FFFFFF", 0)) +
+  annotate(geom = "label", label = paste0("PERMANOVA by study R� = ", format(round(adonis.sal$R2[1], digits = 2), nsmall = 2), "; p < ", adonis.sal$`Pr(>F)`[1], "\nPERMANOVA by salinity R� = ",format(round(adonis.sal.water.cond$R2[1], digits = 2), nsmall = 2), "; p < ", adonis.sal.water.cond$`Pr(>F)`[1]), vjust = 1, hjust = 0, x=-Inf, y = Inf) +
+  theme_bw() +
+  guides(colour=guide_legend(title="Salinity")))
+```
+```{r Sup Fig 10 Salmon diff abund corr plots}
+salmon.temp <- subset_samples(ps.tran, water.cond == "freshwater" & host_species == "Salmo salar")
+
+salmon.temp <- prune_taxa(taxa_sums(salmon.temp) > 0, salmon.temp)
+
+shared <- otu_table(salmon.temp) %>%
+  data.frame() %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  inner_join(., sample_data(salmon.temp) %>%
+               data.frame() %>%
+               rownames_to_column(var = "Sample") %>%
+               select(Sample, temperature_C, BioProject, water.cond),
+             by = "Sample") %>%
+  column_to_rownames(var = "Sample") %>%
+  pivot_longer(cols = starts_with("ASV"), names_to = "ASV", values_to = "rel.abund")
+
+taxonomy <- tax_table(salmon.temp) %>%
+  data.frame() %>%
+  rownames_to_column(var = "ASV") %>%
+  select(-Kingdom, -Phylum, -Class, -Order, -Family, -Species)
+
+composite <- inner_join(shared, taxonomy, by = "ASV") %>%
+  select(-ASV) %>%
+  filter(!is.na(Genus))
+
+fresh.salmon.top.genus <- composite %>%
+  filter(Genus %in% temp.scores$Genus, 
+         water.cond == "freshwater", 
+         !is.na(temperature_C))
+
+fresh.salmon.top.genus.p <- ggplot(fresh.salmon.top.genus, aes(x = temperature_C, y = rel.abund * 100, fill = BioProject, colour = BioProject)) +
+  geom_point(size = 2) +
+  geom_smooth(method = "lm") +
+  facet_wrap(~Genus, scales = "free_y") +
+  theme_bw() +
+  xlab("Temperature 캜") +
+  ylab("Percentage relative abundance") +
+  scale_fill_manual(values = BP.clrs) +
+  scale_colour_manual(values = BP.clrs)
+```
+```{r Sup Fig 11 Salmon diff abund genera temperature}
+salmon.temp <- subset_samples(ps.tran, water.cond == "freshwater" & host_species == "Salmo salar")
+
+salmon.temp <- prune_taxa(taxa_sums(salmon.temp) > 0, salmon.temp)
+
+salmon.temp.meta <- sample_data(salmon.temp) %>%
+  data.frame()
+
+salmon.temp.wunifrac.nmds <- phyloseq::ordinate(salmon.temp, distance = "wunifrac", method = "NMDS")
+
+sal.temp.ASV <- otu_table(salmon.temp) %>%
+  t() %>%
+  data.frame()
+
+sal.temp.env.scores <- envfit(salmon.temp.wunifrac.nmds, sal.temp.ASV, perm = 999)
+
+tax.table <- tax_table(salmon.temp) %>%
+  data.frame() %>%
+  rownames_to_column(var = "ASV") %>%
+  select(ASV, Genus)
+
+spp.scrs <- as.data.frame(scores(sal.temp.env.scores, display = "vectors")) %>%
+  rownames_to_column(var = "ASV")
+
+temp.scores <- sal.temp.env.scores$vectors$pvals %>%
+  data.frame %>%
+  rownames_to_column(var = "ASV") %>%
+  left_join(., rownames_to_column(data.frame(sal.temp.env.scores$vectors$r), var = "ASV"), by = "ASV") %>%
+  dplyr::rename(., pval = `.`, R2 = sal.temp.env.scores.vectors.r) %>%
+  left_join(., tax.table, by = "ASV") %>%
+  left_join(., spp.scrs, by = "ASV") %>%
+  filter(pval <= 0.001 & !is.na(Genus)) %>%
+  slice_max(order_by = R2, n = 10)
+  
+arrow_map = aes(xend = NMDS1*0.5, yend = NMDS2*0.5, x = 0, y = 0, shape = NULL, color = NULL, label = Genus)
+
+label_map = aes(x = NMDS1*0.5, y = NMDS2*0.5, shape = NULL, color = NULL, label = Genus)
+
+arrowhead = arrow(length = unit(0.05, "npc"))
+
+salmon.temp.env.fit.p <- plot_ordination(salmon.temp, salmon.temp.wunifrac.nmds, type = "samples", color = "temperature_C") +
+  geom_point(size=3) +
+  scale_colour_gradient(name = "Temperature (캜)", low = "blue", high = "red", na.value=alpha("#DEDEDE", 0.1)) +
+  geom_segment(arrow_map, linewidth = 1, data = temp.scores, 
+               color = "darkgrey", arrow = arrowhead) + 
+  geom_text_repel(label_map, size = 4, data = temp.scores) +
+  theme_bw() +
+  labs(title="Freshwater Salmo salar (Atlantic Salmon)")
+```
+```{r Sup Fig 12 Dissim matrix comparisons}
+
+HO.clrs <- clrs[1:length(unique(get_variable(ps.tran, "host_order")))]
+names(HO.clrs) <- unique(get_variable(ps.tran, "host_order"))
+
+dist = c("bray", "unifrac", "wunifrac")
+ord_meths = c("NMDS", "PCoA")
+
+#wunifrac.dist <- phyloseq::distance(ps.tran, method = "wunifrac")
+#saveRDS(wunifrac.dist, "data/wunifrac.dist.rds")
+wunifrac.dist <- readRDS("data/wunifrac.dist.rds")
+
+#unifrac.dist <- phyloseq::distance(ps.tran, method = "unifrac")
+#saveRDS(unifrac.dist, "data/unifrac.dist.rds")
+unifrac.dist <- readRDS("data/unifrac.dist.rds")
+
+#bray.dist <- phyloseq::distance(ps.tran, method = "bray")
+#saveRDS(bray.dist, "data/bray.dist.rds")
+bray.dist <- readRDS("data/bray.dist.rds")
+
+for (i in dist){
+  for (j in ord_meths){
+    ordi = ordinate(ps.tran2, method=j, distance=i)
+    ordinations[[i]][j] <- ordi
+    mylist[[i]][j] <- plot_ordination(ps.tran, ordi, "samples", 
+                                      color="host_order")
+  }
+}
+#saveRDS(mylist, "data/mylist.rds")
+mylist <- readRDS("data/mylist.rds")
+
+bray.nmds <- select(mylist$bray$NMDS, NMDS1, NMDS2, host_order, BioProject) %>%
+  dplyr::rename(Axis_1 = NMDS1, Axis_2 = NMDS2) %>%
+  mutate(distance = "Bray-Curtis",
+         ord_meth = "NMDS")
+
+unifrac.nmds <- select(mylist$unifrac$NMDS, NMDS1, NMDS2, host_order, BioProject) %>%
+  dplyr::rename(Axis_1 = NMDS1, Axis_2 = NMDS2) %>%
+  mutate(distance = "Unweighted UniFrac",
+         ord_meth = "NMDS")
+
+wunifrac.nmds <- select(mylist$wunifrac$NMDS, NMDS1, NMDS2, host_order, BioProject) %>%
+  dplyr::rename(Axis_1 = NMDS1, Axis_2 = NMDS2) %>%
+  mutate(distance = "Weighted UniFrac",
+         ord_meth = "NMDS")
+
+bray.pcoa <- select(mylist$bray$PCoA, Axis.1, Axis.2, host_order, BioProject) %>%
+  dplyr::rename(Axis_1 = Axis.1, Axis_2 = Axis.2) %>%
+  mutate(distance = "Bray-Curtis",
+         ord_meth = "PCoA")
+
+unifrac.pcoa <- select(mylist$unifrac$PCoA, Axis.1, Axis.2, host_order, BioProject) %>%
+  dplyr::rename(Axis_1 = Axis.1, Axis_2 = Axis.2) %>%
+  mutate(distance = "Unweighted UniFrac",
+         ord_meth = "PCoA")
+
+wunifrac.pcoa <- select(mylist$wunifrac$PCoA, Axis.1, Axis.2, host_order, BioProject) %>%
+  dplyr::rename(Axis_1 = Axis.1, Axis_2 = Axis.2) %>%
+  mutate(distance = "Weighted UniFrac",
+         ord_meth = "PCoA")
+
+data <- rbind(bray.nmds, unifrac.nmds, wunifrac.nmds,
+              bray.pcoa, unifrac.pcoa, wunifrac.pcoa)
+
+wunifrac.adonis <- adonis2(wunifrac.dist ~ BioProject + host_order, 
+                           permutations = 99, data = sampledata, by = "margin")
+
+unifrac.adonis <- adonis2(unifrac.dist ~ BioProject + host_order, 
+                          permutations = 99, data = sampledata, by = "margin")
+
+bray.adonis <- adonis2(bray.dist ~ BioProject + host_order, 
+                       permutations = 99, data = sampledata, by = "margin")
+
+data <- data %>%
+  mutate(R2 = ifelse(.$distance == "Bray-Curtis", bray.adonis$R2[2], 
+                     ifelse(.$distance == "Unweighted UniFrac", unifrac.adonis$R2[2],
+                            ifelse(.$distance == "Weighted UniFrac", wunifrac.adonis$R2[2], NA))),
+         `P` = ifelse(.$distance == "Bray-Curtis", bray.adonis$`Pr(>F)`[2], 
+                      ifelse(.$distance == "Unweighted UniFrac", unifrac.adonis$`Pr(>F)`[2],
+                             ifelse(.$distance == "Weighted UniFrac", wunifrac.adonis$`Pr(>F)`[2], NA))))
+
+ggplot(data, aes(x = Axis_1, y = Axis_2, color = host_order)) +
+  geom_point() +
+  ggh4x::facet_grid2(distance + paste0("R� = ",round(R2, 3)*100,"%    ", 
+                                       "P = ", round(R2, 2)) 
+                     ~ ord_meth, scales = "free", independent = "all") +
+  scale_color_manual(name = "Host Order", values = HO.clrs) +
+  guides(colour = guide_legend(ncol = 1)) +
+  theme_bw() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank(),
+        axis.title = element_blank())
+```
+```{r Sup table 1 }
+# Get wunifrac dissim matrixs from Figure 4 and 5
+adonis.temp.HS.fresh <- adonis2(wunifrac.temp.fresh ~ temperature_C + host_species, data = data.frame(sample_data(temp.fresh)), permutations = 999, by = "margin")
+
+adonis.temp.HS.salt <- adonis2(wunifrac.temp.salt ~ temperature_C + host_species, data = data.frame(sample_data(temp.salt)), permutations = 999, by = "margin")
+
+adonis.cond.HS.fresh <- adonis2(wunifrac.cond.fresh ~ conductivity_uS_cm.1 + host_species, data = data.frame(sample_data(cond.fresh)), permutations = 999, by = "margin")
+
+adonis.PSU.HS.salt <- adonis2(wunifrac.PSU.salt ~ salinity_PSU + host_species, data = data.frame(sample_data(PSU.salt)), permutations = 999, by = "margin")
+
+adonis.pH.HS.fresh <- adonis2(wunifrac.pH.fresh ~ pH + host_species, data = data.frame(sample_data(pH.fresh)), permutations = 999, by = "margin")
+
+adonis.pH.HS.salt <- adonis2(wunifrac.pH.salt ~ pH + host_species, data = data.frame(sample_data(pH.salt)), permutations = 999, by = "margin")
+
+adonis.dO2.HS.salt <- adonis2(wunifrac.dO2.salt ~ dO2_mg_L.1 + host_species, data = data.frame(sample_data(dO2.salt)), permutations = 999, by = "margin")
+
+adonis.dO2.HS.fresh <- adonis2(wunifrac.dO2.fresh ~ dO2_mg_L.1 + host_species, data = data.frame(sample_data(dO2.fresh)), permutations = 999, by = "margin")
+
+df <- tibble(Water_condtion = c(rep("Freshwater", 8), rep("Saltwater", 8)),
+             Physicochemical_factor =
+               rep(c("Temperature","Temperature","Conductivity","PSU",
+                     "pH","ph","dO2","dO2"), 2),
+             Term = c(rownames(adonis.temp.HS.fresh)[1:2],
+                      rownames(adonis.temp.HS.salt)[1:2],
+                      rownames(adonis.cond.HS.fresh)[1:2],
+                      rownames(adonis.PSU.HS.salt)[1:2],
+                      rownames(adonis.pH.HS.fresh)[1:2],
+                      rownames(adonis.pH.HS.salt)[1:2],
+                      rownames(adonis.dO2.HS.fresh)[1:2],
+                      "dO2_mg_L.1","host_species"),
+             R2 = c(adonis.temp.HS.fresh$R2[1:2],
+                    adonis.temp.HS.salt$R2[1:2],
+                    adonis.cond.HS.fresh$R2[1:2],
+                    adonis.PSU.HS.salt$R2[1:2],
+                    adonis.pH.HS.fresh$R2[1:2],
+                    adonis.pH.HS.salt$R2[1:2],
+                    adonis.dO2.HS.fresh$R2[1:2],
+                    NA,NA))
+````
