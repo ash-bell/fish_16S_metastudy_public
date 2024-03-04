@@ -19,6 +19,6 @@ The skin of fish contains a diverse microbiota that has symbiotic functions with
 ### Keywords
 16S, aquaculture, meta-analysis, microbiota, phylosymbiosis, physicochemical factors, V4
 
-**Summary** 
+### Summary
 Meta-analysis reveals interrelationships between fish species, water physicochemistry, rearing conditions and microbiota in the skin of salt and freshwater fish.
-![Graphical abstract](graphical_abstract.png?raw=true)
+![Graphical abstract](Graphical abstract.png)
